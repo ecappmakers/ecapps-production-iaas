@@ -1,0 +1,80 @@
+services:
+  nginx_proxy:
+    image: 'jc21/nginx-proxy-manager:latest'
+    container_name: nginx_proxy
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '81:81'
+      - '443:443'
+    volumes:
+      - ./data/npm-data:/data
+      - ./data/npm-letsencrypt:/etc/letsencrypt
+    networks:
+      - hosting_net
+
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data/portainer-data:/data
+    networks:
+      - hosting_net
+
+  tomcat_server:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+      args:
+        JRE_VERSION: ${JRE_VERSION}
+        TOMCAT_MAJOR: ${TOMCAT_MAJOR}
+        TOMCAT_VERSION: ${TOMCAT_VERSION}
+    container_name: shared_tomcat
+    restart: always
+    environment:
+      JAVA_OPTS: "-Xms1g -Xmx3500m -XX:+UseG1GC"
+    volumes:
+      - ./data/war-uploads:/usr/local/tomcat/webapps
+      - ./data/tomcat-lib/mariadb-java-client.jar:/usr/local/tomcat/lib/mariadb-java-client.jar
+    networks:
+      - hosting_net
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  apache_server:
+    image: php:${PHP_APACHE_VERSION}
+    container_name: shared_apache
+    restart: always
+    volumes:
+      - ./data/php-sites:/var/www/html
+      - ./configs/php/php.ini:/usr/local/etc/php/conf.d/custom.ini
+    networks:
+      - hosting_net
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+
+  mariadb:
+    image: mariadb:${MARIADB_VERSION}
+    container_name: main_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - ./data/mysql-data:/var/lib/mysql
+      - ./configs/mysql/custom.cnf:/etc/mysql/conf.d/custom.cnf
+    networks:
+      - hosting_net
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+
+networks:
+  hosting_net:
+    driver: bridge
