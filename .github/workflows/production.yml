@@ -56,49 +56,51 @@ jobs:
           name: milestone-release
           path: build_artifacts/**/*
 
-      # 4. DEPLOY TO VPS (Inject Secrets)
+# 4. DEPLOY TO VPS (Inject Secrets)
       - name: Deploy to VPS
         if: github.event_name == 'push'
         uses: appleboy/ssh-action@master
+        # Define environment variables first
+        env:
+          SITE24X7_KEY: ${{ secrets.SITE24X7_KEY }}
+          DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
+        # Pass them to the action configuration
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          # Pass Secrets to the Script Environment
           envs: SITE24X7_KEY,DB_ROOT_PASSWORD
-        env:
-          SITE24X7_KEY: ${{ secrets.SITE24X7_KEY }}
-          DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
-        script: |
-          # Capture Env Vars
-          AGENT_KEY="${SITE24X7_KEY}"
-          DB_PASS="${DB_ROOT_PASSWORD}"
-          BASE="/opt/ecapps-hosting"
-          
-          mkdir -p $BASE/data/{war-uploads,php-sites/www,php-sites/admin,mysql-data,npm-data,tomcat-lib}
-          mkdir -p $BASE/configs
+          # INDENTATION FIX: 'script' is now part of 'with'
+          script: |
+            # Capture Env Vars
+            AGENT_KEY="${SITE24X7_KEY}"
+            DB_PASS="${DB_ROOT_PASSWORD}"
+            BASE="/opt/ecapps-hosting"
+            
+            mkdir -p $BASE/data/{war-uploads,php-sites/www,php-sites/admin,mysql-data,npm-data,tomcat-lib}
+            mkdir -p $BASE/configs
 
-          # Git Sync
-          if [ ! -d "$BASE/.git" ]; then git clone https://github.com/ecappmakers/ecapps-production-iaas.git $BASE; fi
-          cd $BASE
-          git checkout production
-          git pull origin production
-          
-          # --- GENERATE .env FILE ---
-          # 1. Read public versions
-          cat versions.env > .env
-          # 2. Inject private DB Password from GitHub Secret
-          echo "DB_ROOT_PASSWORD=$DB_PASS" >> .env
-          
-          # Site24x7 Check
-          if [ ! -d "/opt/site24x7/monagent" ]; then
-             wget -q https://staticdownloads.site24x7.com/server/Site24x7FullStackAgent_LinuxIns.sh
-             bash Site24x7FullStackAgent_LinuxIns.sh -i -key=$AGENT_KEY -automation=true -apm_insight=false
-             rm Site24x7FullStackAgent_LinuxIns.sh
-          fi
-          
-          # Reload Docker (Uses .env we just made)
-          docker compose up -d --build --remove-orphans
+            # Git Sync
+            if [ ! -d "$BASE/.git" ]; then git clone https://github.com/ecappmakers/ecapps-production-iaas.git $BASE; fi
+            cd $BASE
+            git checkout production
+            git pull origin production
+            
+            # --- GENERATE .env FILE ---
+            # 1. Read public versions
+            cat versions.env > .env
+            # 2. Inject private DB Password from GitHub Secret
+            echo "DB_ROOT_PASSWORD=$DB_PASS" >> .env
+            
+            # Site24x7 Check
+            if [ ! -d "/opt/site24x7/monagent" ]; then
+               wget -q https://staticdownloads.site24x7.com/server/Site24x7FullStackAgent_LinuxIns.sh
+               bash Site24x7FullStackAgent_LinuxIns.sh -i -key=$AGENT_KEY -automation=true -apm_insight=false
+               rm Site24x7FullStackAgent_LinuxIns.sh
+            fi
+            
+            # Reload Docker (Uses .env we just made)
+            docker compose up -d --build --remove-orphans
 
       # 5. COPY FILES TO VPS
       - name: Copy Files
