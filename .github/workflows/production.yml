@@ -268,7 +268,7 @@ jobs:
                     # Move data to live folder
                     mv "$dir" "$BASE/data/php-sites/$safe_name"
                     
-                    # 🛡️ THE 503 FIX: Remove any auto-generated .htaccess from builds
+                    # 🛡️ THE 503 FIX: Remove any auto-generated .htaccess from Node/React builds
                     rm -f "$BASE/data/php-sites/$safe_name/.htaccess"
                     
                     # Write VHost Config
