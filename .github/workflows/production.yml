@@ -179,7 +179,7 @@ jobs:
             docker system prune -f
 
   # ======================================================
-  # 2. DEPLOY JOB (With Safety Checks)
+  # 2. DEPLOY JOB (Condition-Guided Downloads)
   # ======================================================
 
   deploy:
@@ -211,11 +211,22 @@ jobs:
           path: deploy_package/apache
 
       - uses: actions/download-artifact@v4
-        with: { name: log-java, path: logs }
+        with:
+          name: log-java
+          path: logs
+        continue-on-error: true
+
       - uses: actions/download-artifact@v4
-        with: { name: log-php, path: logs }
+        with:
+          name: log-php
+          path: logs
+        continue-on-error: true
+
       - uses: actions/download-artifact@v4
-        with: { name: log-node, path: logs }
+        with:
+          name: log-node
+          path: logs
+        continue-on-error: true
 
       - name: Restart Infrastructure
         uses: appleboy/ssh-action@master
@@ -293,11 +304,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
-        with: { name: log-java, path: logs }; continue-on-error: true
+        with:
+          name: log-java
+          path: logs
+        continue-on-error: true
+
       - uses: actions/download-artifact@v4
-        with: { name: log-php, path: logs }; continue-on-error: true
+        with:
+          name: log-php
+          path: logs
+        continue-on-error: true
+
       - uses: actions/download-artifact@v4
-        with: { name: log-node, path: logs }; continue-on-error: true
+        with:
+          name: log-node
+          path: logs
+        continue-on-error: true
 
       - name: Broadcast Message
         env:
