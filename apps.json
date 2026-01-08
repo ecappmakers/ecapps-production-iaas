@@ -15,6 +15,13 @@
       "branch": "master",
       "build_cmd": "npm install && npm run build",
       "output_dir": "build" 
+    },
+    {
+      "name": "madhumanish.studio",
+      "repo_url": "https://github.com/MathumithaArumugam/madhumanishstudio.git",
+      "branch": "master",
+      "build_cmd": "npm install && npm run build",
+      "output_dir": "build"       
     }
   ]
 }
