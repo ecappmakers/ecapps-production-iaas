@@ -96,7 +96,7 @@ jobs:
     name: 🟢 Build Node.js
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3  # ✅ FIXED: Added actions/ prefix
+      - uses: actions/checkout@v3
       - name: Setup Node
         uses: actions/setup-node@v3
         with:
@@ -166,7 +166,7 @@ jobs:
             docker system prune -f
 
   # ======================================================
-  # 2. DEPLOY JOB (Conditional Logic Fix)
+  # 2. DEPLOY JOB (Condition-Guided Downloads)
   # ======================================================
 
   deploy:
@@ -176,7 +176,6 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      # Use shell scripts to set flags instead of putting 'jq' in the 'if' block
       - name: Check Java Config
         run: |
           if jq -e '.java // [] | length > 0' apps.json > /dev/null; then
@@ -259,14 +258,27 @@ jobs:
           script: |
             BASE="/opt/ecapps-hosting"
             CONFIG_FILE="$BASE/configs/apache/vhosts.conf"
-            echo "# Auto-Generated Config" > $CONFIG_FILE
+            
+            # 1. Fresh start for config
+            echo "# Auto-Generated Config - $(date)" > $CONFIG_FILE
+            
+            # 2. Wipe old sites to ensure no ghost files
             rm -rf $BASE/data/php-sites/*
+            
+            # 3. Process Web Folders (PHP + Node)
             if [ -d "$BASE/temp_deploy/deploy_package/apache" ]; then
                 for dir in $BASE/temp_deploy/deploy_package/apache/*/; do
                     [ -d "$dir" ] || continue
                     domain=$(basename "$dir")
                     safe_name="${domain//./_}_public_html"
+                    
+                    # Move data to live folder
                     mv "$dir" "$BASE/data/php-sites/$safe_name"
+                    
+                    # 🛡️ THE 503 FIX: Remove any auto-generated .htaccess from Node/React builds
+                    rm -f "$BASE/data/php-sites/$safe_name/.htaccess"
+                    
+                    # Write VHost Config
                     echo "<VirtualHost *:80>" >> $CONFIG_FILE
                     echo "    ServerName $domain" >> $CONFIG_FILE
                     [ "$domain" == "ecapps.in" ] && echo "    ServerAlias www.ecapps.in" >> $CONFIG_FILE
@@ -275,14 +287,21 @@ jobs:
                     echo "        Options Indexes FollowSymLinks" >> $CONFIG_FILE
                     echo "        AllowOverride All" >> $CONFIG_FILE
                     echo "        Require all granted" >> $CONFIG_FILE
+                    echo "        FallbackResource /index.html" >> $CONFIG_FILE
                     echo "    </Directory>" >> $CONFIG_FILE
                     echo "</VirtualHost>" >> $CONFIG_FILE
-                    echo "" >> $CONFIG_FILE
                 done
             fi
+            
+            # 4. Java Processing
             if [ -d "$BASE/temp_deploy/deploy_package/wars" ]; then
                 mv $BASE/temp_deploy/deploy_package/wars/*.war $BASE/data/war-uploads/ || true
             fi
+            
+            # 5. KILL THE 503 GHOSTS: Disable default container sites
+            docker exec shared_apache a2dissite 000-default || true
+            
+            # 6. Permissions & Hard Restart
             chown -R 33:33 $BASE/data/php-sites/
             chmod -R 755 $BASE/data/php-sites/ $BASE/data/war-uploads/
             docker restart shared_apache
