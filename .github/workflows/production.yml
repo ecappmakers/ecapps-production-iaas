@@ -1,0 +1,129 @@
+name: Production Build & Deploy
+on:
+  push:
+    branches: [ "production" ]
+    paths:
+      - 'versions.env'
+      - 'java/**'
+      - 'apache/**'
+      - '.github/workflows/**'
+  milestone:
+    types: [created]
+
+jobs:
+  build-process:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      # 1. SETUP & BUILD JAVA
+      - name: Set up JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'zulu'
+          cache: maven
+      
+      - name: Build WARs
+        run: |
+          mkdir -p build_artifacts/wars
+          for d in java/*/; do
+            if [ -f "$d/pom.xml" ]; then
+                app_name=$(basename "$d")
+                echo "🚀 Building: $app_name"
+                pushd "$d"
+                mvn clean package -DskipTests
+                mv target/*.war ../../build_artifacts/wars/$app_name.war
+                popd
+            fi
+          done
+
+      # 2. ZIP APACHE FOLDERS
+      - name: Zip Apache
+        run: |
+          mkdir -p build_artifacts/apache_zips
+          cd apache
+          for d in */; do
+            dirname=${d%/}
+            zip -r "../build_artifacts/apache_zips/$dirname.zip" "$dirname"
+          done
+
+      # 3. UPLOAD ARTIFACTS (Milestone Only)
+      - name: Upload Milestone Artifacts
+        if: github.event_name == 'milestone'
+        uses: actions/upload-artifact@v3
+        with:
+          name: milestone-release
+          path: build_artifacts/**/*
+
+      # 4. DEPLOY TO VPS (Inject Secrets)
+      - name: Deploy to VPS
+        if: github.event_name == 'push'
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          # Pass Secrets to the Script Environment
+          envs: SITE24X7_KEY,DB_ROOT_PASSWORD
+        env:
+          SITE24X7_KEY: ${{ secrets.SITE24X7_KEY }}
+          DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
+        script: |
+          # Capture Env Vars
+          AGENT_KEY="${SITE24X7_KEY}"
+          DB_PASS="${DB_ROOT_PASSWORD}"
+          BASE="/opt/ecapps-hosting"
+          
+          mkdir -p $BASE/data/{war-uploads,php-sites/www,php-sites/admin,mysql-data,npm-data,tomcat-lib}
+          mkdir -p $BASE/configs
+
+          # Git Sync
+          if [ ! -d "$BASE/.git" ]; then git clone https://github.com/ecappmakers/ecapps-production-iaas.git $BASE; fi
+          cd $BASE
+          git checkout production
+          git pull origin production
+          
+          # --- GENERATE .env FILE ---
+          # 1. Read public versions
+          cat versions.env > .env
+          # 2. Inject private DB Password from GitHub Secret
+          echo "DB_ROOT_PASSWORD=$DB_PASS" >> .env
+          
+          # Site24x7 Check
+          if [ ! -d "/opt/site24x7/monagent" ]; then
+             wget -q https://staticdownloads.site24x7.com/server/Site24x7FullStackAgent_LinuxIns.sh
+             bash Site24x7FullStackAgent_LinuxIns.sh -i -key=$AGENT_KEY -automation=true -apm_insight=false
+             rm Site24x7FullStackAgent_LinuxIns.sh
+          fi
+          
+          # Reload Docker (Uses .env we just made)
+          docker compose up -d --build --remove-orphans
+
+      # 5. COPY FILES TO VPS
+      - name: Copy Files
+        if: github.event_name == 'push'
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "build_artifacts/wars/*.war,apache/*"
+          target: "/opt/ecapps-hosting/temp_deploy/"
+
+      # 6. INSTALL FILES
+      - name: Finalize Install
+        if: github.event_name == 'push'
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            BASE="/opt/ecapps-hosting"
+            # Move WARs (Hot Deploy)
+            mv $BASE/temp_deploy/build_artifacts/wars/*.war $BASE/data/war-uploads/
+            # Move Apache Sites
+            cp -r $BASE/temp_deploy/apache/* $BASE/data/php-sites/
+            # Cleanup
+            rm -rf $BASE/temp_deploy
