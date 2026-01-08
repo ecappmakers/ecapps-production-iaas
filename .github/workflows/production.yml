@@ -175,7 +175,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - name: Check Java Config
         run: |
           if jq -e '.java // [] | length > 0' apps.json > /dev/null; then
@@ -187,7 +186,6 @@ jobs:
         with:
           name: java-wars
           path: deploy_package/wars
-
       - name: Check PHP Config
         run: |
           if jq -e '.php // [] | length > 0' apps.json > /dev/null; then
@@ -199,7 +197,6 @@ jobs:
         with:
           name: php-sites
           path: deploy_package/apache
-
       - name: Check Node Config
         run: |
           if jq -e '.node // [] | length > 0' apps.json > /dev/null; then
@@ -211,7 +208,6 @@ jobs:
         with:
           name: node-sites
           path: deploy_package/apache
-
       - uses: actions/download-artifact@v4
         with: { name: log-java, path: logs }
         continue-on-error: true
@@ -221,7 +217,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: log-node, path: logs }
         continue-on-error: true
-
       - name: Restart Infrastructure
         uses: appleboy/ssh-action@master
         env:
@@ -239,7 +234,6 @@ jobs:
             cat versions.env > .env
             echo "DB_ROOT_PASSWORD=$DB_ROOT_PASSWORD" >> .env
             docker compose up -d
-
       - name: Copy Files
         uses: appleboy/scp-action@master
         with:
@@ -248,7 +242,6 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           source: "deploy_package/"
           target: "/opt/ecapps-hosting/temp_deploy/"
-
       - name: Finalize Installation
         uses: appleboy/ssh-action@master
         with:
@@ -275,7 +268,7 @@ jobs:
                     # Move data to live folder
                     mv "$dir" "$BASE/data/php-sites/$safe_name"
                     
-                    # 🛡️ THE 503 FIX: Remove any auto-generated .htaccess from Node/React builds
+                    # 🛡️ THE 503 FIX: Remove any auto-generated .htaccess from builds
                     rm -f "$BASE/data/php-sites/$safe_name/.htaccess"
                     
                     # Write VHost Config
@@ -298,8 +291,9 @@ jobs:
                 mv $BASE/temp_deploy/deploy_package/wars/*.war $BASE/data/war-uploads/ || true
             fi
             
-            # 5. KILL THE 503 GHOSTS: Disable default container sites
+            # 5. 🏥 SELF-HEALING: Clean internal container state
             docker exec shared_apache a2dissite 000-default || true
+            docker exec shared_apache a2enmod rewrite || true
             
             # 6. Permissions & Hard Restart
             chown -R 33:33 $BASE/data/php-sites/
@@ -310,7 +304,6 @@ jobs:
   # ======================================================
   # 3. NOTIFICATION JOB (Broadcast)
   # ======================================================
-
   notify:
     name: 🔔 Notify Telegram
     needs: [deploy]
@@ -326,7 +319,6 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: log-node, path: logs }
         continue-on-error: true
-
       - name: Broadcast Message
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -335,13 +327,13 @@ jobs:
           if [ "$DEPLOY_STATUS" == "success" ]; then
             EMOJI="✅"; TITLE="Deployment Successful"; MESSAGE="<b>Updated Apps:</b>"
             if ls logs/*.txt 1> /dev/null 2>&1; then 
-                cat logs/*.txt > all_apps.txt
+                 cat logs/*.txt > all_apps.txt
                 while IFS= read -r line; do
                     [[ -z "${line// }" ]] && continue
                     MESSAGE+="%0A• $line"
                 done < all_apps.txt
             else 
-                MESSAGE+="%0A(Infrastructure Update Only)"
+                 MESSAGE+="%0A(Infrastructure Update Only)"
             fi
           else
             EMOJI="❌"; TITLE="Deployment Failed"; MESSAGE="⚠️ <b>Error:</b> Check GitHub Actions logs."
