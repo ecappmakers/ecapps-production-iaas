@@ -22,7 +22,7 @@ jobs:
         with:
           java-version: '11'
           distribution: 'zulu'
-          # Removed cache to prevent errors if no pom.xml exists in root
+          # Removed cache to prevent crash if repo has no java files initially
       
       - name: Process Java Apps
         env:
@@ -31,9 +31,10 @@ jobs:
           mkdir -p artifacts/wars
           touch built_java.txt
           
+          # Safety Check: Default to empty list if missing
           if jq -e '.java // [] | length > 0' apps.json > /dev/null; then
             for row in $(jq -r '.java[] | @base64' apps.json); do
-                _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
+                _jq() { echo ${row} | base64 --decode | jq -r "${1}"; }
                 NAME=$(_jq '.name'); REPO=$(_jq '.repo_url'); BRANCH=$(_jq '.branch')
                 AUTH_REPO=$(echo $REPO | sed "s/https:\/\//https:\/\/oauth2:${GH_PAT}@/")
                 
@@ -74,7 +75,7 @@ jobs:
           
           if jq -e '.php // [] | length > 0' apps.json > /dev/null; then
             for row in $(jq -r '.php[] | @base64' apps.json); do
-                _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
+                _jq() { echo ${row} | base64 --decode | jq -r "${1}"; }
                 NAME=$(_jq '.name'); REPO=$(_jq '.repo_url'); BRANCH=$(_jq '.branch')
                 AUTH_REPO=$(echo $REPO | sed "s/https:\/\//https:\/\/oauth2:${GH_PAT}@/")
                 
@@ -96,7 +97,7 @@ jobs:
           name: log-php
           path: built_php.txt
 
-  # --- JOB 1C: BUILD NODE.JS APPS (WITH DEBUG LOGGING) ---
+  # --- JOB 1C: BUILD NODE.JS APPS (With JQ Fix + Debugging) ---
   build-node:
     name: 🟢 Build Node.js
     runs-on: ubuntu-latest
@@ -114,14 +115,20 @@ jobs:
           
           if jq -e '.node // [] | length > 0' apps.json > /dev/null; then
             for row in $(jq -r '.node[] | @base64' apps.json); do
-                _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
-                NAME=$(_jq '.name'); REPO=$(_jq '.repo_url'); BRANCH=$(_jq '.branch'); OUT_DIR=$(_jq '.output_dir // "build"')
+                # ⚠️ FIXED: Added quotes "${1}" to handle spaces in default values
+                _jq() { echo ${row} | base64 --decode | jq -r "${1}"; }
+                
+                NAME=$(_jq '.name')
+                REPO=$(_jq '.repo_url')
+                BRANCH=$(_jq '.branch')
+                # Defaults to "build" if output_dir is missing
+                OUT_DIR=$(_jq '.output_dir // "build"')
+                
                 AUTH_REPO=$(echo $REPO | sed "s/https:\/\//https:\/\/oauth2:${GH_PAT}@/")
                 
                 echo "---------------------------------------------------"
                 echo "🟢 Starting Build: $NAME"
                 echo "ℹ️  Repo: $REPO"
-                echo "ℹ️  Branch: $BRANCH"
                 echo "ℹ️  Target Output Dir: $OUT_DIR"
                 
                 git clone --branch $BRANCH --single-branch $AUTH_REPO temp_node
@@ -133,20 +140,19 @@ jobs:
                 echo "🏗️  Running Build..."
                 npm run build
                 
-                # --- DEBUG SECTION START ---
-                echo "🔍 DEBUG: Listing root directory contents after build:"
+                # --- DEBUG LOGGING ---
+                echo "🔍 DEBUG: Files generated after build:"
                 ls -F
-                if [ -d "dist" ]; then echo "🔍 Found 'dist' folder."; fi
-                if [ -d "build" ]; then echo "🔍 Found 'build' folder."; fi
-                if [ -d "out" ]; then echo "🔍 Found 'out' folder."; fi
-                # --- DEBUG SECTION END ---
+                if [ -d "dist" ]; then echo "Found 'dist' folder"; fi
+                if [ -d "build" ]; then echo "Found 'build' folder"; fi
+                # ---------------------
                 
                 if [ -d "$OUT_DIR" ]; then
-                    echo "✅ Found expected directory '$OUT_DIR'. Moving..."
+                    echo "✅ Found output folder '$OUT_DIR'. Moving..."
                     mv "$OUT_DIR" ../artifacts/node_to_apache/${NAME}
                 else
-                    echo "❌ CRITICAL ERROR: Could not find output folder '$OUT_DIR'"
-                    echo "👉 Please check the 'DEBUG: Listing root directory' above to see what was actually created."
+                    echo "❌ CRITICAL ERROR: Output folder '$OUT_DIR' not found!"
+                    echo "👉 Check the debug output above. If your app uses 'dist', update apps.json to: \"output_dir\": \"dist\""
                     exit 1
                 fi
                 popd
@@ -241,7 +247,7 @@ jobs:
           name: node-sites
           path: deploy_package/apache
 
-      # Download Logs
+      # Download Logs (Corrected YAML Syntax)
       - uses: actions/download-artifact@v4
         with:
           name: log-java
