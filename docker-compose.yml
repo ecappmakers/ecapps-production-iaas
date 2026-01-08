@@ -1,4 +1,7 @@
+version: '3.8'
+
 services:
+  # --- INFRASTRUCTURE ---
   nginx_proxy:
     image: 'jc21/nginx-proxy-manager:latest'
     container_name: nginx_proxy
@@ -23,7 +26,9 @@ services:
     networks:
       - hosting_net
 
+  # --- APPLICATIONS ---
   tomcat_server:
+    # ⚠️ Ensure a Dockerfile exists, or switch to: image: tomcat:10.1
     build: 
       context: .
       dockerfile: Dockerfile
