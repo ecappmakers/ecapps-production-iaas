@@ -119,7 +119,7 @@ jobs:
           target: "/opt/ecapps-hosting/temp_deploy/"
 
       # 6. INSTALL FILES
-      - name: Finalize Install
+      - name: Finalize Installation
         if: github.event_name == 'push'
         uses: appleboy/ssh-action@master
         with:
