@@ -14,7 +14,7 @@
       "repo_url": "https://github.com/ecappmakers/DevSuite.git",
       "branch": "master",
       "build_cmd": "npm install && npm run build",
-      "output_dir": "build" 
+      "output_dir": "dist" 
     }
   ]
 }
