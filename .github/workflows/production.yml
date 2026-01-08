@@ -14,8 +14,6 @@ jobs:
   build-java:
     name: ☕ Build Java
     runs-on: ubuntu-latest
-    outputs:
-      has_java: ${{ env.HAS_JAVA }}
     steps:
       - uses: actions/checkout@v3
       - name: Set up JDK 11
@@ -61,8 +59,6 @@ jobs:
   build-php:
     name: 🐘 Package PHP
     runs-on: ubuntu-latest
-    outputs:
-      has_php: ${{ env.HAS_PHP }}
     steps:
       - uses: actions/checkout@v3
       - name: Process PHP Apps
@@ -99,11 +95,10 @@ jobs:
   build-node:
     name: 🟢 Build Node.js
     runs-on: ubuntu-latest
-    outputs:
-      has_node: ${{ env.HAS_NODE }}
     steps:
-      - uses: checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v3  # ✅ FIXED: Added actions/ prefix
+      - name: Setup Node
+        uses: actions/setup-node@v3
         with:
           node-version: 18
       - name: Process Node Apps
@@ -171,7 +166,7 @@ jobs:
             docker system prune -f
 
   # ======================================================
-  # 2. DEPLOY JOB (Using Job Outputs for Safety)
+  # 2. DEPLOY JOB (Conditional Logic Fix)
   # ======================================================
 
   deploy:
@@ -181,42 +176,39 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      # 🛡️ Step-level Shell logic to check apps.json (Works everywhere)
-      - name: Download Java
+      # Use shell scripts to set flags instead of putting 'jq' in the 'if' block
+      - name: Check Java Config
         run: |
           if jq -e '.java // [] | length > 0' apps.json > /dev/null; then
-             echo "Fetching Java artifacts..."
-          else
-             echo "SKIP=true" >> $GITHUB_ENV
+             echo "FETCH_JAVA=true" >> $GITHUB_ENV
           fi
-      - uses: actions/download-artifact@v4
-        if: env.SKIP != 'true'
+      - name: Download Java
+        if: env.FETCH_JAVA == 'true'
+        uses: actions/download-artifact@v4
         with:
           name: java-wars
           path: deploy_package/wars
 
-      - name: Download PHP
+      - name: Check PHP Config
         run: |
           if jq -e '.php // [] | length > 0' apps.json > /dev/null; then
-             echo "Fetching PHP artifacts..."
-          else
-             echo "SKIP_PHP=true" >> $GITHUB_ENV
+             echo "FETCH_PHP=true" >> $GITHUB_ENV
           fi
-      - uses: actions/download-artifact@v4
-        if: env.SKIP_PHP != 'true'
+      - name: Download PHP
+        if: env.FETCH_PHP == 'true'
+        uses: actions/download-artifact@v4
         with:
           name: php-sites
           path: deploy_package/apache
 
-      - name: Download Node
+      - name: Check Node Config
         run: |
           if jq -e '.node // [] | length > 0' apps.json > /dev/null; then
-             echo "Fetching Node artifacts..."
-          else
-             echo "SKIP_NODE=true" >> $GITHUB_ENV
+             echo "FETCH_NODE=true" >> $GITHUB_ENV
           fi
-      - uses: actions/download-artifact@v4
-        if: env.SKIP_NODE != 'true'
+      - name: Download Node
+        if: env.FETCH_NODE == 'true'
+        uses: actions/download-artifact@v4
         with:
           name: node-sites
           path: deploy_package/apache
@@ -297,7 +289,7 @@ jobs:
             rm -rf $BASE/temp_deploy
 
   # ======================================================
-  # 3. NOTIFICATION JOB
+  # 3. NOTIFICATION JOB (Broadcast)
   # ======================================================
 
   notify:
