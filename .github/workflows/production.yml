@@ -19,23 +19,24 @@ jobs:
       - uses: actions/checkout@v3
       - name: Set up JDK 11
         uses: actions/setup-java@v3
-        with:
-          java-version: '11'
-          distribution: 'zulu'
-          cache: 'maven'
+        with: { java-version: '11', distribution: 'zulu', cache: 'maven' }
       
       - name: Process Java Apps
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           mkdir -p artifacts/wars
-          if jq -e '.java | length > 0' apps.json > /dev/null; then
+          touch built_java.txt # Create empty log to prevent upload error
+          
+          # Check if 'java' exists AND has items. Defaults to empty list [] if missing.
+          if jq -e '.java // [] | length > 0' apps.json > /dev/null; then
+            echo "☕ Found Java Apps..."
             for row in $(jq -r '.java[] | @base64' apps.json); do
                 _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
                 NAME=$(_jq '.name'); REPO=$(_jq '.repo_url'); BRANCH=$(_jq '.branch')
                 AUTH_REPO=$(echo $REPO | sed "s/https:\/\//https:\/\/oauth2:${GH_PAT}@/")
                 
-                echo "☕ Building: $NAME"
+                echo "--> Building: $NAME"
                 git clone --branch $BRANCH --single-branch $AUTH_REPO temp_java
                 pushd temp_java
                 mvn clean package -DskipTests
@@ -44,16 +45,15 @@ jobs:
                 rm -rf temp_java
                 echo "$NAME (Java)" >> built_java.txt
             done
+          else
+            echo "⚠️ No Java apps configured. Skipping build."
           fi
+      
+      # Upload artifacts (Even if empty, so Deploy job doesn't crash)
       - uses: actions/upload-artifact@v4
-        with:
-          name: java-wars
-          path: artifacts/wars
-          retention-days: 1
+        with: { name: java-wars, path: artifacts/wars, retention-days: 1 }
       - uses: actions/upload-artifact@v4
-        with:
-          name: log-java
-          path: built_java.txt
+        with: { name: log-java, path: built_java.txt }
 
   # --- JOB 1B: PACKAGE PHP SITES ---
   build-php:
@@ -66,27 +66,28 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           mkdir -p artifacts/apache
-          if jq -e '.php | length > 0' apps.json > /dev/null; then
+          touch built_php.txt
+          
+          # Check if 'php' exists AND has items
+          if jq -e '.php // [] | length > 0' apps.json > /dev/null; then
+            echo "🐘 Found PHP Apps..."
             for row in $(jq -r '.php[] | @base64' apps.json); do
                 _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
                 NAME=$(_jq '.name'); REPO=$(_jq '.repo_url'); BRANCH=$(_jq '.branch')
                 AUTH_REPO=$(echo $REPO | sed "s/https:\/\//https:\/\/oauth2:${GH_PAT}@/")
                 
-                echo "🐘 Cloning: $NAME"
+                echo "--> Cloning: $NAME"
                 git clone --branch $BRANCH --single-branch $AUTH_REPO artifacts/apache/${NAME}
                 rm -rf artifacts/apache/${NAME}/.git
                 echo "$NAME (PHP)" >> built_php.txt
             done
+          else
+            echo "⚠️ No PHP apps configured. Skipping."
           fi
       - uses: actions/upload-artifact@v4
-        with:
-          name: php-sites
-          path: artifacts/apache
-          retention-days: 1
+        with: { name: php-sites, path: artifacts/apache, retention-days: 1 }
       - uses: actions/upload-artifact@v4
-        with:
-          name: log-php
-          path: built_php.txt
+        with: { name: log-php, path: built_php.txt }
 
   # --- JOB 1C: BUILD NODE.JS APPS ---
   build-node:
@@ -95,20 +96,23 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3
-        with:
-          node-version: 18
+        with: { node-version: 18 }
       - name: Process Node Apps
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           mkdir -p artifacts/node_to_apache
-          if jq -e '.node | length > 0' apps.json > /dev/null; then
+          touch built_node.txt
+          
+          # Check if 'node' exists AND has items
+          if jq -e '.node // [] | length > 0' apps.json > /dev/null; then
+            echo "🟢 Found Node Apps..."
             for row in $(jq -r '.node[] | @base64' apps.json); do
                 _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
                 NAME=$(_jq '.name'); REPO=$(_jq '.repo_url'); BRANCH=$(_jq '.branch'); OUT_DIR=$(_jq '.output_dir // "build"')
                 AUTH_REPO=$(echo $REPO | sed "s/https:\/\//https:\/\/oauth2:${GH_PAT}@/")
                 
-                echo "🟢 Building: $NAME"
+                echo "--> Building: $NAME"
                 git clone --branch $BRANCH --single-branch $AUTH_REPO temp_node
                 pushd temp_node
                 npm install && npm run build
@@ -116,23 +120,20 @@ jobs:
                 if [ -d "$OUT_DIR" ]; then
                     mv "$OUT_DIR" ../artifacts/node_to_apache/${NAME}
                 else
-                    echo "❌ Build failed or output dir '$OUT_DIR' missing"
+                    echo "❌ Output dir '$OUT_DIR' missing"
                     exit 1
                 fi
                 popd
                 rm -rf temp_node
                 echo "$NAME (Node)" >> built_node.txt
             done
+          else
+            echo "⚠️ No Node apps configured. Skipping."
           fi
       - uses: actions/upload-artifact@v4
-        with:
-          name: node-sites
-          path: artifacts/node_to_apache
-          retention-days: 1
+        with: { name: node-sites, path: artifacts/node_to_apache, retention-days: 1 }
       - uses: actions/upload-artifact@v4
-        with:
-          name: log-node
-          path: built_node.txt
+        with: { name: log-node, path: built_node.txt }
 
   # --- JOB 1D: INFRASTRUCTURE OPERATIONS ---
   infra-ops:
@@ -154,36 +155,28 @@ jobs:
             BACKUP_DIR="$BASE/backups"
             DATE=$(date +%Y-%m-%d_%H%M)
             
-            # 1. Prepare Structure
             mkdir -p $BACKUP_DIR
             mkdir -p $BASE/data/{war-uploads,php-sites,mysql-data,npm-data,portainer-data,tomcat-lib}
             mkdir -p $BASE/configs/apache
             
-            # 2. 💾 DATABASE BACKUP
-            if [ -d "$BASE/data/mysql-data" ]; then
+            # DB BACKUP
+            if [ -d "$BASE/data/mysql-data" ] && docker ps | grep -q main_db; then
                 echo "💾 Backing up Database..."
-                if docker ps | grep -q main_db; then
-                    docker exec main_db mysqldump -u root --password=$DB_ROOT_PASSWORD --all-databases > $BACKUP_DIR/db_backup_$DATE.sql
-                    gzip $BACKUP_DIR/db_backup_$DATE.sql
-                    find $BACKUP_DIR -name "*.sql.gz" -mtime +7 -exec rm {} \;
-                else
-                    echo "⚠️ DB Container not running, skipping backup."
-                fi
+                docker exec main_db mysqldump -u root --password=$DB_ROOT_PASSWORD --all-databases > $BACKUP_DIR/db_backup_$DATE.sql
+                gzip $BACKUP_DIR/db_backup_$DATE.sql
+                find $BACKUP_DIR -name "*.sql.gz" -mtime +7 -exec rm {} \;
             fi
 
-            # 3. 🔄 SYNC INFRA CODE
+            # SYNC
             cd $BASE
             git fetch origin production && git reset --hard origin/production
             
-            # 4. ⚡ PRE-PULL IMAGES (Quiet to prevent hang)
-            echo "⚡ Pre-pulling latest Docker images..."
+            # PRE-PULL (Quiet)
             docker compose pull --quiet
-            
-            # 5. 🧹 SYSTEM PRUNE
             docker system prune -f
 
   # ======================================================
-  # 2. DEPLOY JOB (Waits for Code + Infra Prep)
+  # 2. DEPLOY JOB
   # ======================================================
 
   deploy:
@@ -193,42 +186,23 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      # Download Artifacts
+      # Download Artifacts (Will download empty folders if skipped - prevents crash)
       - uses: actions/download-artifact@v4
-        with:
-          name: java-wars
-          path: deploy_package/wars
-
+        with: { name: java-wars, path: deploy_package/wars }
       - uses: actions/download-artifact@v4
-        with:
-          name: php-sites
-          path: deploy_package/apache
-
+        with: { name: php-sites, path: deploy_package/apache }
       - uses: actions/download-artifact@v4
-        with:
-          name: node-sites
-          path: deploy_package/apache
-
-      # Download Logs (Corrected YAML Syntax)
+        with: { name: node-sites, path: deploy_package/apache }
+      
+      # Download Logs
       - uses: actions/download-artifact@v4
-        with:
-          name: log-java
-          path: logs
-        continue-on-error: true
-
+        with: { name: log-java, path: logs }
       - uses: actions/download-artifact@v4
-        with:
-          name: log-php
-          path: logs
-        continue-on-error: true
-
+        with: { name: log-php, path: logs }
       - uses: actions/download-artifact@v4
-        with:
-          name: log-node
-          path: logs
-        continue-on-error: true
+        with: { name: log-node, path: logs }
 
-      # START CONTAINERS
+      # START INFRASTRUCTURE
       - name: Restart Infrastructure
         uses: appleboy/ssh-action@master
         env:
@@ -240,15 +214,13 @@ jobs:
           envs: DB_ROOT_PASSWORD
           script: |
             BASE="/opt/ecapps-hosting"
-            
-            # Clean Staging
             rm -rf $BASE/temp_deploy
             
-            # Reset Apache Config
+            # Reset Config
             rm -rf $BASE/configs/apache/vhosts.conf
             touch $BASE/configs/apache/vhosts.conf
             
-            # Start/Update
+            # Start
             cd $BASE
             cat versions.env > .env
             echo "DB_ROOT_PASSWORD=$DB_ROOT_PASSWORD" >> .env
@@ -279,7 +251,7 @@ jobs:
             # 🧹 Clean Old Sites
             rm -rf $BASE/data/php-sites/*
             
-            # Process Websites
+            # Process Web (PHP + Node)
             if [ -d "$BASE/temp_deploy/deploy_package/apache" ]; then
                 for dir in $BASE/temp_deploy/deploy_package/apache/*/; do
                     [ -d "$dir" ] || continue
@@ -315,7 +287,7 @@ jobs:
             rm -rf $BASE/temp_deploy
 
   # ======================================================
-  # 3. NOTIFICATION JOB (BROADCAST MODE)
+  # 3. NOTIFICATION JOB (Broadcast)
   # ======================================================
 
   notify:
@@ -325,21 +297,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
-        with: { name: log-java, path: logs }
-        continue-on-error: true
+        with: { name: log-java, path: logs }; continue-on-error: true
       - uses: actions/download-artifact@v4
-        with: { name: log-php, path: logs }
-        continue-on-error: true
+        with: { name: log-php, path: logs }; continue-on-error: true
       - uses: actions/download-artifact@v4
-        with: { name: log-node, path: logs }
-        continue-on-error: true
+        with: { name: log-node, path: logs }; continue-on-error: true
 
-      - name: Broadcast Telegram Message
+      - name: Broadcast Message
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           DEPLOY_STATUS: ${{ needs.deploy.result }}
         run: |
-          # 1. Prepare Message
           if [ "$DEPLOY_STATUS" == "success" ]; then
             EMOJI="✅"; TITLE="Deployment Successful"; MESSAGE="<b>Updated Apps:</b>"
             if ls logs/*.txt 1> /dev/null 2>&1; then 
@@ -354,19 +322,15 @@ jobs:
           
           FINAL_MSG="$EMOJI <b>$TITLE</b>%0A%0A$MESSAGE"
 
-          # 2. FETCH SUBSCRIBERS (Dynamic Broadcast)
-          # We call getUpdates to see who has messaged the bot, extract their IDs, and send to all.
+          # Fetch & Broadcast
           echo "📡 Fetching subscribers..."
           UPDATES=$(curl -s "https://api.telegram.org/bot$BOT_TOKEN/getUpdates")
-          
-          # Use JQ to extract unique chat IDs
           CHAT_IDS=$(echo "$UPDATES" | jq -r '.result[].message.chat.id' | sort -u)
           
           if [ -z "$CHAT_IDS" ]; then
-             echo "⚠️ No active subscribers found (Chat history might be empty)."
+             echo "⚠️ No active subscribers found."
           else
              for id in $CHAT_IDS; do
-                echo "📤 Sending to Chat ID: $id"
                 curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
                   -d chat_id="$id" -d parse_mode="HTML" -d text="$FINAL_MSG"
              done
