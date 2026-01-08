@@ -56,15 +56,13 @@ jobs:
           name: milestone-release
           path: build_artifacts/**/*
 
-      # 4. DEPLOY TO VPS (Inject Secrets)
+      # 4. DEPLOY TO VPS (Fixed Git Logic)
       - name: Deploy to VPS
         if: github.event_name == 'push'
         uses: appleboy/ssh-action@master
-        # Define environment variables first
         env:
           SITE24X7_KEY: ${{ secrets.SITE24X7_KEY }}
           DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
-        # Pass them to the action configuration
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -75,30 +73,38 @@ jobs:
             AGENT_KEY="${SITE24X7_KEY}"
             DB_PASS="${DB_ROOT_PASSWORD}"
             BASE="/opt/ecapps-hosting"
+            REPO_URL="https://github.com/ecappmakers/ecapps-production-iaas.git"
             
+            # 1. Ensure Folder Exists
             mkdir -p $BASE/data/{war-uploads,php-sites/www,php-sites/admin,mysql-data,npm-data,tomcat-lib}
             mkdir -p $BASE/configs
 
-            # Git Sync
-            if [ ! -d "$BASE/.git" ]; then git clone https://github.com/ecappmakers/ecapps-production-iaas.git $BASE; fi
+            # 2. SAFE GIT SYNC (Fixes the "Directory not empty" error)
             cd $BASE
-            git checkout production
-            git pull origin production
             
-            # --- GENERATE .env FILE ---
-            # 1. Read public versions
+            # If .git doesn't exist, initialize it
+            if [ ! -d ".git" ]; then
+                git init
+                git remote add origin $REPO_URL
+            fi
+            
+            # Fetch and reset to ensure we match production exactly
+            git fetch origin production
+            git reset --hard origin/production
+            
+            # 3. GENERATE .env FILE
             cat versions.env > .env
-            # 2. Inject private DB Password from GitHub Secret
             echo "DB_ROOT_PASSWORD=$DB_PASS" >> .env
             
-            # Site24x7 Check
+            # 4. Site24x7 Check
             if [ ! -d "/opt/site24x7/monagent" ]; then
                wget -q https://staticdownloads.site24x7.com/server/Site24x7FullStackAgent_LinuxIns.sh
                bash Site24x7FullStackAgent_LinuxIns.sh -i -key=$AGENT_KEY -automation=true -apm_insight=false
                rm Site24x7FullStackAgent_LinuxIns.sh
             fi
             
-            # Reload Docker (Uses .env we just made)
+            # 5. Reload Docker
+            # This will now work because docker-compose.yml is present
             docker compose up -d --build --remove-orphans
 
       # 5. COPY FILES TO VPS
