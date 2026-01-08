@@ -1,65 +1,133 @@
-name: Production Build & Deploy
+name: Production Modular Pipeline
 
 on:
   push:
     branches: [ "production" ]
-    paths:
-      - 'versions.env'
-      - 'java/**'
-      - 'apache/**'
-      - '.github/workflows/**'
+    paths-ignore:
+      - 'README.md'
   milestone:
     types: [created]
 
 jobs:
-  build-process:
+  # ======================================================
+  # 1. BUILD JOBS (Run in Parallel)
+  # ======================================================
+
+  build-java:
+    name: ☕ Build Java (WARs)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
-      # 1. SETUP & BUILD JAVA
       - name: Set up JDK 11
         uses: actions/setup-java@v3
         with:
           java-version: '11'
           distribution: 'zulu'
           cache: maven
-          
-      - name: Build WARs
+      
+      - name: Build WAR Files
         run: |
-          mkdir -p build_artifacts/wars
+          mkdir -p artifacts/wars
           for d in java/*/; do
             if [ -f "$d/pom.xml" ]; then
                 app_name=$(basename "$d")
                 echo "🚀 Building: $app_name"
                 pushd "$d"
                 mvn clean package -DskipTests
-                mv target/*.war ../../build_artifacts/wars/$app_name.war
+                mv target/*.war ../../artifacts/wars/$app_name.war
                 popd
             fi
           done
-
-      # 2. ZIP APACHE FOLDERS
-      - name: Zip Apache
-        run: |
-          mkdir -p build_artifacts/apache_zips
-          cd apache
-          for d in */; do
-            dirname=${d%/}
-            zip -r "../build_artifacts/apache_zips/$dirname.zip" "$dirname"
-          done
-
-      # 3. UPLOAD ARTIFACTS (Milestone Only)
-      - name: Upload Milestone Artifacts
-        if: github.event_name == 'milestone'
+      
+      - name: Upload Java Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: milestone-release
-          path: build_artifacts/**/*
+          name: java-wars
+          path: artifacts/wars
+          retention-days: 1
 
-      # 4. DEPLOY TO VPS
-      - name: Deploy to VPS
-        if: github.event_name == 'push'
+  build-php:
+    name: 🐘 Package PHP (Apache)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Prepare Apache Folders
+        run: |
+          mkdir -p artifacts/apache
+          # Copy all folders from repo 'apache/' to artifacts
+          if [ -d "apache" ]; then
+            cp -r apache/* artifacts/apache/
+          fi
+      
+      - name: Upload PHP Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-sites
+          path: artifacts/apache
+          retention-days: 1
+
+  build-node:
+    name: 🟢 Build Node.js (Future Proof)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+      
+      - name: Build Node Apps
+        run: |
+          mkdir -p artifacts/node
+          # Loop through node apps if they exist (Placeholder logic)
+          if [ -d "node_apps" ]; then
+            for d in node_apps/*/; do
+              app_name=$(basename "$d")
+              echo "Building Node App: $app_name"
+              cd "$d"
+              npm install && npm run build
+              # Zip the build folder
+              zip -r ../../artifacts/node/$app_name.zip build/
+              cd ../..
+            done
+          else
+            echo "No Node apps found, skipping."
+          fi
+
+      - name: Upload Node Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-apps
+          path: artifacts/node
+          retention-days: 1
+
+  # ======================================================
+  # 2. DEPLOYMENT JOB (Runs after Builds)
+  # ======================================================
+
+  deploy:
+    name: 🚀 Deploy to VPS
+    needs: [build-java, build-php, build-node] # Waits for all builds
+    runs-on: ubuntu-latest
+    steps:
+      # --- A. PREPARE FILES ---
+      - uses: actions/checkout@v3
+      
+      - name: Download Java Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: java-wars
+          path: deploy_package/wars
+
+      - name: Download PHP Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: php-sites
+          path: deploy_package/apache
+
+      # --- B. INFRASTRUCTURE SETUP ---
+      - name: Setup Infrastructure (Docker & Network)
         uses: appleboy/ssh-action@master
         env:
           SITE24X7_KEY: ${{ secrets.SITE24X7_KEY }}
@@ -75,16 +143,16 @@ jobs:
             BASE="/opt/ecapps-hosting"
             REPO_URL="https://github.com/ecappmakers/ecapps-production-iaas.git"
             
-            # Ensure folders exist
+            # 1. Structure Setup
             mkdir -p $BASE/data/{war-uploads,php-sites,mysql-data,npm-data,portainer-data,tomcat-lib}
             mkdir -p $BASE/configs/apache
             
-            # ⚠️ SELF-HEALING FIX: Force delete the "directory" if it exists, then touch the file
+            # 2. Self-Healing Config Fix
             rm -rf $BASE/configs/apache/vhosts.conf
             touch $BASE/configs/apache/vhosts.conf
             
+            # 3. Git Infrastructure Sync
             cd $BASE
-            # Git Sync
             if [ ! -d ".git" ]; then
                 git init
                 git remote add origin $REPO_URL
@@ -92,34 +160,25 @@ jobs:
             git fetch origin production
             git reset --hard origin/production
             
-            # Generate .env
+            # 4. Generate Env & Monitor
             cat versions.env > .env
             echo "DB_ROOT_PASSWORD=$DB_PASS" >> .env
             
-            # Site24x7 Check (Optional)
-            if [ ! -d "/opt/site24x7/monagent" ]; then
-               wget -q https://staticdownloads.site24x7.com/server/Site24x7FullStackAgent_LinuxIns.sh
-               bash Site24x7FullStackAgent_LinuxIns.sh -i -key=$AGENT_KEY -automation=true -apm_insight=false
-               rm Site24x7FullStackAgent_LinuxIns.sh
-            fi
-            
-            # Reload Docker
+            # 5. Start/Update Containers
             docker compose up -d --build
 
-      # 5. COPY FILES TO VPS
-      - name: Copy Files
-        if: github.event_name == 'push'
+      # --- C. COPY ARTIFACTS ---
+      - name: Copy Files to Server
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: "build_artifacts/wars/*.war,apache/*"
+          source: "deploy_package/wars/*.war,deploy_package/apache/*"
           target: "/opt/ecapps-hosting/temp_deploy/"
 
-      # 6. FINAL INSTALLATION & APACHE CONFIG GENERATOR
-      - name: Finalize Installation
-        if: github.event_name == 'push'
+      # --- D. INSTALL & CONFIGURE ---
+      - name: Finalize Installation & Auto-Config
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -129,23 +188,22 @@ jobs:
             BASE="/opt/ecapps-hosting"
             CONFIG_FILE="$BASE/configs/apache/vhosts.conf"
             
-            # 1. Setup Config File Header
-            echo "# Auto-Generated by GitHub Actions" > $CONFIG_FILE
+            echo "# Auto-Generated Apache Config" > $CONFIG_FILE
             
-            # 2. Process PHP Sites Dynamically
-            for dir in $BASE/temp_deploy/apache/*/; do
+            # 1. Process PHP Sites (Dynamic VirtualHosts)
+            # Note: Path is now 'deploy_package/apache' because of artifact download structure
+            for dir in $BASE/temp_deploy/deploy_package/apache/*/; do
                 [ -d "$dir" ] || continue
-                
                 domain=$(basename "$dir")
                 safe_name="${domain//./_}_public_html"
                 
-                echo "⚙️ Configuring Site: $domain -> $safe_name"
+                echo "⚙️ Configuring: $domain -> $safe_name"
                 
-                # Move files
+                # Move & Clean
                 rm -rf "$BASE/data/php-sites/$safe_name"
                 mv "$dir" "$BASE/data/php-sites/$safe_name"
                 
-                # Write VirtualHost Block
+                # Write VHost
                 echo "<VirtualHost *:80>" >> $CONFIG_FILE
                 echo "    ServerName $domain" >> $CONFIG_FILE
                 if [ "$domain" == "ecapps.in" ]; then
@@ -161,15 +219,14 @@ jobs:
                 echo "" >> $CONFIG_FILE
             done
             
-            # 3. Process Tomcat WARs
-            mv $BASE/temp_deploy/build_artifacts/wars/*.war $BASE/data/war-uploads/ || true
+            # 2. Process Java WARs
+            mv $BASE/temp_deploy/deploy_package/wars/*.war $BASE/data/war-uploads/ || true
             
-            # 4. Fix Permissions
+            # 3. Permissions & Reload
             chown -R 33:33 $BASE/data/php-sites/
             chmod -R 755 $BASE/data/php-sites/
             chmod -R 755 $BASE/data/war-uploads/
             
-            # 5. Reload Apache
             docker exec shared_apache apachectl -k graceful
             
             # Cleanup
