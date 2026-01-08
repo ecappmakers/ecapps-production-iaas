@@ -17,13 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      
       - name: Set up JDK 11
         uses: actions/setup-java@v3
         with:
           java-version: '11'
           distribution: 'zulu'
-          # ⚠️ REMOVED "cache: maven" to prevent crash if no pom.xml exists
+          # Removed cache to prevent errors if no pom.xml exists in root
       
       - name: Process Java Apps
         env:
@@ -97,7 +96,7 @@ jobs:
           name: log-php
           path: built_php.txt
 
-  # --- JOB 1C: BUILD NODE.JS APPS ---
+  # --- JOB 1C: BUILD NODE.JS APPS (WITH DEBUG LOGGING) ---
   build-node:
     name: 🟢 Build Node.js
     runs-on: ubuntu-latest
@@ -119,15 +118,35 @@ jobs:
                 NAME=$(_jq '.name'); REPO=$(_jq '.repo_url'); BRANCH=$(_jq '.branch'); OUT_DIR=$(_jq '.output_dir // "build"')
                 AUTH_REPO=$(echo $REPO | sed "s/https:\/\//https:\/\/oauth2:${GH_PAT}@/")
                 
-                echo "🟢 Building: $NAME"
+                echo "---------------------------------------------------"
+                echo "🟢 Starting Build: $NAME"
+                echo "ℹ️  Repo: $REPO"
+                echo "ℹ️  Branch: $BRANCH"
+                echo "ℹ️  Target Output Dir: $OUT_DIR"
+                
                 git clone --branch $BRANCH --single-branch $AUTH_REPO temp_node
                 pushd temp_node
-                npm install && npm run build
+                
+                echo "📦 Installing Dependencies..."
+                npm install
+                
+                echo "🏗️  Running Build..."
+                npm run build
+                
+                # --- DEBUG SECTION START ---
+                echo "🔍 DEBUG: Listing root directory contents after build:"
+                ls -F
+                if [ -d "dist" ]; then echo "🔍 Found 'dist' folder."; fi
+                if [ -d "build" ]; then echo "🔍 Found 'build' folder."; fi
+                if [ -d "out" ]; then echo "🔍 Found 'out' folder."; fi
+                # --- DEBUG SECTION END ---
                 
                 if [ -d "$OUT_DIR" ]; then
+                    echo "✅ Found expected directory '$OUT_DIR'. Moving..."
                     mv "$OUT_DIR" ../artifacts/node_to_apache/${NAME}
                 else
-                    echo "❌ Build failed or output dir '$OUT_DIR' missing"
+                    echo "❌ CRITICAL ERROR: Could not find output folder '$OUT_DIR'"
+                    echo "👉 Please check the 'DEBUG: Listing root directory' above to see what was actually created."
                     exit 1
                 fi
                 popd
@@ -188,7 +207,7 @@ jobs:
             cd $BASE
             git fetch origin production && git reset --hard origin/production
             
-            # 4. ⚡ PRE-PULL IMAGES (Quiet to prevent hang)
+            # 4. ⚡ PRE-PULL IMAGES (Quiet)
             echo "⚡ Pre-pulling latest Docker images..."
             docker compose pull --quiet
             
@@ -206,7 +225,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      # Download Artifacts (Will download empty folders if skipped - prevents crash)
+      # Download Artifacts
       - uses: actions/download-artifact@v4
         with:
           name: java-wars
