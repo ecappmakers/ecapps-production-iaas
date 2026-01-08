@@ -296,6 +296,7 @@ jobs:
             fi
             
             # 5. AGGRESSIVE SELF-HEALING (The 503 fix)
+            docker exec shared_apache truncate -s 0 /etc/apache2/sites-enabled/000-default.conf || true
             docker exec shared_apache rm -f /etc/apache2/sites-enabled/000-default.conf || true
             docker exec shared_apache a2enmod rewrite || true
             
