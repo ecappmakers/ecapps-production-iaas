@@ -139,7 +139,7 @@ jobs:
   infra-ops:
     name: 🔧 Infra Ops
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: SSH & Maintenance
         uses: appleboy/ssh-action@master
@@ -149,6 +149,8 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          timeout: 60s
+          command_timeout: 10m
           envs: DB_ROOT_PASSWORD
           script: |
             BASE="/opt/ecapps-hosting"
@@ -217,6 +219,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: log-node, path: logs }
         continue-on-error: true
+
       - name: Restart Infrastructure
         uses: appleboy/ssh-action@master
         env:
@@ -225,6 +228,8 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          timeout: 60s
+          command_timeout: 10m
           envs: DB_ROOT_PASSWORD
           script: |
             BASE="/opt/ecapps-hosting"
@@ -234,20 +239,25 @@ jobs:
             cat versions.env > .env
             echo "DB_ROOT_PASSWORD=$DB_ROOT_PASSWORD" >> .env
             docker compose up -d
+
       - name: Copy Files
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          timeout: 60s
           source: "deploy_package/"
           target: "/opt/ecapps-hosting/temp_deploy/"
+
       - name: Finalize Installation
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          timeout: 60s
+          command_timeout: 10m
           script: |
             BASE="/opt/ecapps-hosting"
             CONFIG_FILE="$BASE/configs/apache/vhosts.conf"
@@ -255,23 +265,18 @@ jobs:
             # 1. Fresh start for config
             echo "# Auto-Generated Config - $(date)" > $CONFIG_FILE
             
-            # 2. Wipe old sites to ensure no ghost files
+            # 2. Wipe old sites
             rm -rf $BASE/data/php-sites/*
             
-            # 3. Process Web Folders (PHP + Node)
+            # 3. Process Web Folders
             if [ -d "$BASE/temp_deploy/deploy_package/apache" ]; then
                 for dir in $BASE/temp_deploy/deploy_package/apache/*/; do
                     [ -d "$dir" ] || continue
                     domain=$(basename "$dir")
                     safe_name="${domain//./_}_public_html"
-                    
-                    # Move data to live folder
                     mv "$dir" "$BASE/data/php-sites/$safe_name"
-                    
-                    # 🛡️ THE 503 FIX: Remove any auto-generated .htaccess from builds
                     rm -f "$BASE/data/php-sites/$safe_name/.htaccess"
                     
-                    # Write VHost Config
                     echo "<VirtualHost *:80>" >> $CONFIG_FILE
                     echo "    ServerName $domain" >> $CONFIG_FILE
                     [ "$domain" == "ecapps.in" ] && echo "    ServerAlias www.ecapps.in" >> $CONFIG_FILE
@@ -286,24 +291,22 @@ jobs:
                 done
             fi
             
-            # 4. Java Processing
             if [ -d "$BASE/temp_deploy/deploy_package/wars" ]; then
                 mv $BASE/temp_deploy/deploy_package/wars/*.war $BASE/data/war-uploads/ || true
             fi
             
-            # 5. 🏥 AGGRESSIVE SELF-HEALING: Force Clean Internal State
-            # We use 'rm -f' because a2dissite fails when the file is not a symlink
+            # 5. AGGRESSIVE SELF-HEALING (The 503 fix)
             docker exec shared_apache rm -f /etc/apache2/sites-enabled/000-default.conf || true
             docker exec shared_apache a2enmod rewrite || true
             
-            # 6. Permissions & Hard Restart
+            # 6. Permissions & Restart
             chown -R 33:33 $BASE/data/php-sites/
             chmod -R 755 $BASE/data/php-sites/ $BASE/data/war-uploads/
             docker restart shared_apache
             rm -rf $BASE/temp_deploy
 
   # ======================================================
-  # 3. NOTIFICATION JOB (Broadcast)
+  # 3. NOTIFICATION JOB
   # ======================================================
   notify:
     name: 🔔 Notify Telegram
