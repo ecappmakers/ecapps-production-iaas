@@ -10,7 +10,7 @@ on:
 
 jobs:
   # ======================================================
-  # 1. BUILD JOBS (Run in Parallel)
+  # 1. PARALLEL BUILD JOBS
   # ======================================================
 
   build-java:
@@ -55,7 +55,7 @@ jobs:
       - name: Prepare Apache Folders
         run: |
           mkdir -p artifacts/apache
-          # Copy all folders from repo 'apache/' to artifacts
+          # Copy all domain folders from repo 'apache/' to artifacts
           if [ -d "apache" ]; then
             cp -r apache/* artifacts/apache/
           fi
@@ -68,7 +68,7 @@ jobs:
           retention-days: 1
 
   build-node:
-    name: 🟢 Build Node.js (Future Proof)
+    name: 🟢 Build Node.js (Placeholder)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -80,19 +80,15 @@ jobs:
       - name: Build Node Apps
         run: |
           mkdir -p artifacts/node
-          # Loop through node apps if they exist (Placeholder logic)
           if [ -d "node_apps" ]; then
             for d in node_apps/*/; do
               app_name=$(basename "$d")
               echo "Building Node App: $app_name"
               cd "$d"
               npm install && npm run build
-              # Zip the build folder
               zip -r ../../artifacts/node/$app_name.zip build/
               cd ../..
             done
-          else
-            echo "No Node apps found, skipping."
           fi
 
       - name: Upload Node Artifacts
@@ -103,12 +99,12 @@ jobs:
           retention-days: 1
 
   # ======================================================
-  # 2. DEPLOYMENT JOB (Runs after Builds)
+  # 2. DEPLOYMENT JOB (Runs after ALL builds finish)
   # ======================================================
 
   deploy:
     name: 🚀 Deploy to VPS
-    needs: [build-java, build-php, build-node] # Waits for all builds
+    needs: [build-java, build-php, build-node]
     runs-on: ubuntu-latest
     steps:
       # --- A. PREPARE FILES ---
@@ -126,8 +122,8 @@ jobs:
           name: php-sites
           path: deploy_package/apache
 
-      # --- B. INFRASTRUCTURE SETUP ---
-      - name: Setup Infrastructure (Docker & Network)
+      # --- B. INFRASTRUCTURE & DB SETUP ---
+      - name: Setup Infrastructure (Docker, Network, DB)
         uses: appleboy/ssh-action@master
         env:
           SITE24X7_KEY: ${{ secrets.SITE24X7_KEY }}
@@ -143,11 +139,15 @@ jobs:
             BASE="/opt/ecapps-hosting"
             REPO_URL="https://github.com/ecappmakers/ecapps-production-iaas.git"
             
+            # ⚠️ CRITICAL FIX: Wipe the staging area clean before we start
+            # This prevents old/deleted folders from reappearing
+            rm -rf $BASE/temp_deploy
+            
             # 1. Structure Setup
             mkdir -p $BASE/data/{war-uploads,php-sites,mysql-data,npm-data,portainer-data,tomcat-lib}
             mkdir -p $BASE/configs/apache
             
-            # 2. Self-Healing Config Fix
+            # 2. SELF-HEALING: Reset config file
             rm -rf $BASE/configs/apache/vhosts.conf
             touch $BASE/configs/apache/vhosts.conf
             
@@ -160,11 +160,18 @@ jobs:
             git fetch origin production
             git reset --hard origin/production
             
-            # 4. Generate Env & Monitor
+            # 4. Generate Env
             cat versions.env > .env
             echo "DB_ROOT_PASSWORD=$DB_PASS" >> .env
             
-            # 5. Start/Update Containers
+            # 5. Site24x7 Check
+            if [ ! -d "/opt/site24x7/monagent" ]; then
+               wget -q https://staticdownloads.site24x7.com/server/Site24x7FullStackAgent_LinuxIns.sh
+               bash Site24x7FullStackAgent_LinuxIns.sh -i -key=$AGENT_KEY -automation=true -apm_insight=false
+               rm Site24x7FullStackAgent_LinuxIns.sh
+            fi
+            
+            # 6. Start Containers
             docker compose up -d --build
 
       # --- C. COPY ARTIFACTS ---
@@ -174,10 +181,10 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: "deploy_package/wars/*.war,deploy_package/apache/*"
+          source: "deploy_package/"
           target: "/opt/ecapps-hosting/temp_deploy/"
 
-      # --- D. INSTALL & CONFIGURE ---
+      # --- D. INSTALL & AUTO-CONFIGURE ---
       - name: Finalize Installation & Auto-Config
         uses: appleboy/ssh-action@master
         with:
@@ -190,8 +197,8 @@ jobs:
             
             echo "# Auto-Generated Apache Config" > $CONFIG_FILE
             
-            # 1. Process PHP Sites (Dynamic VirtualHosts)
-            # Note: Path is now 'deploy_package/apache' because of artifact download structure
+            # 1. Process PHP Sites
+            # Since we cleaned temp_deploy in Step B, ONLY current GitHub folders exist here now.
             for dir in $BASE/temp_deploy/deploy_package/apache/*/; do
                 [ -d "$dir" ] || continue
                 domain=$(basename "$dir")
@@ -199,7 +206,7 @@ jobs:
                 
                 echo "⚙️ Configuring: $domain -> $safe_name"
                 
-                # Move & Clean
+                # Clean old target folder & Move new one
                 rm -rf "$BASE/data/php-sites/$safe_name"
                 mv "$dir" "$BASE/data/php-sites/$safe_name"
                 
@@ -222,11 +229,12 @@ jobs:
             # 2. Process Java WARs
             mv $BASE/temp_deploy/deploy_package/wars/*.war $BASE/data/war-uploads/ || true
             
-            # 3. Permissions & Reload
+            # 3. Permissions
             chown -R 33:33 $BASE/data/php-sites/
             chmod -R 755 $BASE/data/php-sites/
             chmod -R 755 $BASE/data/war-uploads/
             
+            # 4. Reload Apache
             docker exec shared_apache apachectl -k graceful
             
             # Cleanup
