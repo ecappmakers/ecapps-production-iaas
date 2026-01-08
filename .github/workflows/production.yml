@@ -19,7 +19,10 @@ jobs:
       - uses: actions/checkout@v3
       - name: Set up JDK 11
         uses: actions/setup-java@v3
-        with: { java-version: '11', distribution: 'zulu', cache: 'maven' }
+        with:
+          java-version: '11'
+          distribution: 'zulu'
+          cache: 'maven'
       
       - name: Process Java Apps
         env:
@@ -43,9 +46,14 @@ jobs:
             done
           fi
       - uses: actions/upload-artifact@v4
-        with: { name: java-wars, path: artifacts/wars, retention-days: 1 }
+        with:
+          name: java-wars
+          path: artifacts/wars
+          retention-days: 1
       - uses: actions/upload-artifact@v4
-        with: { name: log-java, path: built_java.txt }
+        with:
+          name: log-java
+          path: built_java.txt
 
   # --- JOB 1B: PACKAGE PHP SITES ---
   build-php:
@@ -71,9 +79,14 @@ jobs:
             done
           fi
       - uses: actions/upload-artifact@v4
-        with: { name: php-sites, path: artifacts/apache, retention-days: 1 }
+        with:
+          name: php-sites
+          path: artifacts/apache
+          retention-days: 1
       - uses: actions/upload-artifact@v4
-        with: { name: log-php, path: built_php.txt }
+        with:
+          name: log-php
+          path: built_php.txt
 
   # --- JOB 1C: BUILD NODE.JS APPS ---
   build-node:
@@ -82,7 +95,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3
-        with: { node-version: 18 }
+        with:
+          node-version: 18
       - name: Process Node Apps
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
@@ -99,7 +113,6 @@ jobs:
                 pushd temp_node
                 npm install && npm run build
                 
-                # Move build output (dist/build) to artifacts so it becomes a website
                 if [ -d "$OUT_DIR" ]; then
                     mv "$OUT_DIR" ../artifacts/node_to_apache/${NAME}
                 else
@@ -112,9 +125,14 @@ jobs:
             done
           fi
       - uses: actions/upload-artifact@v4
-        with: { name: node-sites, path: artifacts/node_to_apache, retention-days: 1 }
+        with:
+          name: node-sites
+          path: artifacts/node_to_apache
+          retention-days: 1
       - uses: actions/upload-artifact@v4
-        with: { name: log-node, path: built_node.txt }
+        with:
+          name: log-node
+          path: built_node.txt
 
   # --- JOB 1D: INFRASTRUCTURE OPERATIONS ---
   infra-ops:
@@ -144,11 +162,9 @@ jobs:
             # 2. 💾 DATABASE BACKUP
             if [ -d "$BASE/data/mysql-data" ]; then
                 echo "💾 Backing up Database..."
-                # Check if container exists before dumping
                 if docker ps | grep -q main_db; then
                     docker exec main_db mysqldump -u root --password=$DB_ROOT_PASSWORD --all-databases > $BACKUP_DIR/db_backup_$DATE.sql
                     gzip $BACKUP_DIR/db_backup_$DATE.sql
-                    # Delete backups older than 7 days
                     find $BACKUP_DIR -name "*.sql.gz" -mtime +7 -exec rm {} \;
                 else
                     echo "⚠️ DB Container not running, skipping backup."
@@ -159,7 +175,7 @@ jobs:
             cd $BASE
             git fetch origin production && git reset --hard origin/production
             
-            # 4. ⚡ PRE-PULL IMAGES (Quiet mode to prevent hangs)
+            # 4. ⚡ PRE-PULL IMAGES (Quiet to prevent hang)
             echo "⚡ Pre-pulling latest Docker images..."
             docker compose pull --quiet
             
@@ -172,26 +188,45 @@ jobs:
 
   deploy:
     name: 🚀 Deploy to VPS
-    needs: [build-java, build-php, build-node, infra-ops] # Waits for ALL 4
+    needs: [build-java, build-php, build-node, infra-ops]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
-      # Download All Artifacts
+      # Download Artifacts
       - uses: actions/download-artifact@v4
-        with: { name: java-wars, path: deploy_package/wars }
+        with:
+          name: java-wars
+          path: deploy_package/wars
+
       - uses: actions/download-artifact@v4
-        with: { name: php-sites, path: deploy_package/apache }
+        with:
+          name: php-sites
+          path: deploy_package/apache
+
       - uses: actions/download-artifact@v4
-        with: { name: node-sites, path: deploy_package/apache } # Merge Node into Apache
-      
-      # Download Logs
+        with:
+          name: node-sites
+          path: deploy_package/apache
+
+      # Download Logs (Corrected YAML Syntax)
       - uses: actions/download-artifact@v4
-        with: { name: log-java, path: logs }; continue-on-error: true
+        with:
+          name: log-java
+          path: logs
+        continue-on-error: true
+
       - uses: actions/download-artifact@v4
-        with: { name: log-php, path: logs }; continue-on-error: true
+        with:
+          name: log-php
+          path: logs
+        continue-on-error: true
+
       - uses: actions/download-artifact@v4
-        with: { name: log-node, path: logs }; continue-on-error: true
+        with:
+          name: log-node
+          path: logs
+        continue-on-error: true
 
       # START CONTAINERS
       - name: Restart Infrastructure
@@ -206,14 +241,14 @@ jobs:
           script: |
             BASE="/opt/ecapps-hosting"
             
-            # Clean Staging Area
+            # Clean Staging
             rm -rf $BASE/temp_deploy
             
-            # Reset Apache Config (Self-Healing)
+            # Reset Apache Config
             rm -rf $BASE/configs/apache/vhosts.conf
             touch $BASE/configs/apache/vhosts.conf
             
-            # Start/Update Containers
+            # Start/Update
             cd $BASE
             cat versions.env > .env
             echo "DB_ROOT_PASSWORD=$DB_ROOT_PASSWORD" >> .env
@@ -244,17 +279,15 @@ jobs:
             # 🧹 Clean Old Sites
             rm -rf $BASE/data/php-sites/*
             
-            # Process Websites (PHP + Node)
+            # Process Websites
             if [ -d "$BASE/temp_deploy/deploy_package/apache" ]; then
                 for dir in $BASE/temp_deploy/deploy_package/apache/*/; do
                     [ -d "$dir" ] || continue
                     domain=$(basename "$dir")
                     safe_name="${domain//./_}_public_html"
                     
-                    # Move to live folder
                     mv "$dir" "$BASE/data/php-sites/$safe_name"
                     
-                    # Write VHost Config
                     echo "<VirtualHost *:80>" >> $CONFIG_FILE
                     echo "    ServerName $domain" >> $CONFIG_FILE
                     [ "$domain" == "ecapps.in" ] && echo "    ServerAlias www.ecapps.in" >> $CONFIG_FILE
@@ -278,15 +311,11 @@ jobs:
             chown -R 33:33 $BASE/data/php-sites/
             chmod -R 755 $BASE/data/php-sites/
             chmod -R 755 $BASE/data/war-uploads/
-            
-            # Force Apache to reload config
             docker restart shared_apache
-            
-            # Cleanup
             rm -rf $BASE/temp_deploy
 
   # ======================================================
-  # 3. NOTIFICATION JOB
+  # 3. NOTIFICATION JOB (BROADCAST MODE)
   # ======================================================
 
   notify:
@@ -296,18 +325,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
-        with: { name: log-java, path: logs }; continue-on-error: true
+        with: { name: log-java, path: logs }
+        continue-on-error: true
       - uses: actions/download-artifact@v4
-        with: { name: log-php, path: logs }; continue-on-error: true
+        with: { name: log-php, path: logs }
+        continue-on-error: true
       - uses: actions/download-artifact@v4
-        with: { name: log-node, path: logs }; continue-on-error: true
+        with: { name: log-node, path: logs }
+        continue-on-error: true
 
-      - name: Send Telegram Message
+      - name: Broadcast Telegram Message
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DEPLOY_STATUS: ${{ needs.deploy.result }}
         run: |
+          # 1. Prepare Message
           if [ "$DEPLOY_STATUS" == "success" ]; then
             EMOJI="✅"; TITLE="Deployment Successful"; MESSAGE="<b>Updated Apps:</b>"
             if ls logs/*.txt 1> /dev/null 2>&1; then 
@@ -320,5 +352,22 @@ jobs:
             EMOJI="❌"; TITLE="Deployment Failed"; MESSAGE="⚠️ <b>Error:</b> Check GitHub Actions logs."
           fi
           
-          curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-            -d chat_id="$CHAT_ID" -d parse_mode="HTML" -d text="$EMOJI <b>$TITLE</b>%0A%0A$MESSAGE"
+          FINAL_MSG="$EMOJI <b>$TITLE</b>%0A%0A$MESSAGE"
+
+          # 2. FETCH SUBSCRIBERS (Dynamic Broadcast)
+          # We call getUpdates to see who has messaged the bot, extract their IDs, and send to all.
+          echo "📡 Fetching subscribers..."
+          UPDATES=$(curl -s "https://api.telegram.org/bot$BOT_TOKEN/getUpdates")
+          
+          # Use JQ to extract unique chat IDs
+          CHAT_IDS=$(echo "$UPDATES" | jq -r '.result[].message.chat.id' | sort -u)
+          
+          if [ -z "$CHAT_IDS" ]; then
+             echo "⚠️ No active subscribers found (Chat history might be empty)."
+          else
+             for id in $CHAT_IDS; do
+                echo "📤 Sending to Chat ID: $id"
+                curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+                  -d chat_id="$id" -d parse_mode="HTML" -d text="$FINAL_MSG"
+             done
+          fi
