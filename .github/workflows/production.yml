@@ -1,180 +1,226 @@
-name: Production Modular Pipeline
+name: Production Infrastructure Pipeline
 
 on:
   push:
     branches: [ "production" ]
-    paths-ignore:
-      - 'README.md'
-  milestone:
-    types: [created]
+    paths: [ "apps.json", ".github/workflows/**", "docker-compose.yml" ]
+  workflow_dispatch:
 
 jobs:
   # ======================================================
-  # 1. PARALLEL BUILD JOBS
+  # 1. PARALLEL JOBS (Code Builds + Infra Ops)
   # ======================================================
 
+  # --- JOB 1A: BUILD JAVA WARs ---
   build-java:
-    name: ☕ Build Java (WARs)
+    name: ☕ Build Java
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
       - name: Set up JDK 11
         uses: actions/setup-java@v3
-        with:
-          java-version: '11'
-          distribution: 'zulu'
-          cache: maven
+        with: { java-version: '11', distribution: 'zulu', cache: 'maven' }
       
-      - name: Build WAR Files
+      - name: Process Java Apps
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           mkdir -p artifacts/wars
-          for d in java/*/; do
-            if [ -f "$d/pom.xml" ]; then
-                app_name=$(basename "$d")
-                echo "🚀 Building: $app_name"
-                pushd "$d"
+          if jq -e '.java | length > 0' apps.json > /dev/null; then
+            for row in $(jq -r '.java[] | @base64' apps.json); do
+                _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
+                NAME=$(_jq '.name'); REPO=$(_jq '.repo_url'); BRANCH=$(_jq '.branch')
+                AUTH_REPO=$(echo $REPO | sed "s/https:\/\//https:\/\/oauth2:${GH_PAT}@/")
+                
+                echo "☕ Building: $NAME"
+                git clone --branch $BRANCH --single-branch $AUTH_REPO temp_java
+                pushd temp_java
                 mvn clean package -DskipTests
-                mv target/*.war ../../artifacts/wars/$app_name.war
+                mv target/*.war ../artifacts/wars/${NAME}.war
                 popd
-            fi
-          done
-      
-      - name: Upload Java Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: java-wars
-          path: artifacts/wars
-          retention-days: 1
-
-  build-php:
-    name: 🐘 Package PHP (Apache)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      
-      - name: Prepare Apache Folders
-        run: |
-          mkdir -p artifacts/apache
-          # Copy all domain folders from repo 'apache/' to artifacts
-          if [ -d "apache" ]; then
-            cp -r apache/* artifacts/apache/
-          fi
-      
-      - name: Upload PHP Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: php-sites
-          path: artifacts/apache
-          retention-days: 1
-
-  build-node:
-    name: 🟢 Build Node.js (Placeholder)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Setup Node
-        uses: actions/setup-node@v3
-        with:
-          node-version: 18
-      
-      - name: Build Node Apps
-        run: |
-          mkdir -p artifacts/node
-          if [ -d "node_apps" ]; then
-            for d in node_apps/*/; do
-              app_name=$(basename "$d")
-              echo "Building Node App: $app_name"
-              cd "$d"
-              npm install && npm run build
-              zip -r ../../artifacts/node/$app_name.zip build/
-              cd ../..
+                rm -rf temp_java
+                echo "$NAME (Java)" >> built_java.txt
             done
           fi
+      - uses: actions/upload-artifact@v4
+        with: { name: java-wars, path: artifacts/wars, retention-days: 1 }
+      - uses: actions/upload-artifact@v4
+        with: { name: log-java, path: built_java.txt }
 
-      - name: Upload Node Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: node-apps
-          path: artifacts/node
-          retention-days: 1
-
-  # ======================================================
-  # 2. DEPLOYMENT JOB (Runs after ALL builds finish)
-  # ======================================================
-
-  deploy:
-    name: 🚀 Deploy to VPS
-    needs: [build-java, build-php, build-node]
+  # --- JOB 1B: PACKAGE PHP SITES ---
+  build-php:
+    name: 🐘 Package PHP
     runs-on: ubuntu-latest
     steps:
-      # --- A. PREPARE FILES ---
       - uses: actions/checkout@v3
-      
-      - name: Download Java Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: java-wars
-          path: deploy_package/wars
+      - name: Process PHP Apps
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          mkdir -p artifacts/apache
+          if jq -e '.php | length > 0' apps.json > /dev/null; then
+            for row in $(jq -r '.php[] | @base64' apps.json); do
+                _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
+                NAME=$(_jq '.name'); REPO=$(_jq '.repo_url'); BRANCH=$(_jq '.branch')
+                AUTH_REPO=$(echo $REPO | sed "s/https:\/\//https:\/\/oauth2:${GH_PAT}@/")
+                
+                echo "🐘 Cloning: $NAME"
+                git clone --branch $BRANCH --single-branch $AUTH_REPO artifacts/apache/${NAME}
+                rm -rf artifacts/apache/${NAME}/.git
+                echo "$NAME (PHP)" >> built_php.txt
+            done
+          fi
+      - uses: actions/upload-artifact@v4
+        with: { name: php-sites, path: artifacts/apache, retention-days: 1 }
+      - uses: actions/upload-artifact@v4
+        with: { name: log-php, path: built_php.txt }
 
-      - name: Download PHP Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: php-sites
-          path: deploy_package/apache
+  # --- JOB 1C: BUILD NODE.JS APPS ---
+  build-node:
+    name: 🟢 Build Node.js
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with: { node-version: 18 }
+      - name: Process Node Apps
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          mkdir -p artifacts/node_to_apache
+          if jq -e '.node | length > 0' apps.json > /dev/null; then
+            for row in $(jq -r '.node[] | @base64' apps.json); do
+                _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
+                NAME=$(_jq '.name'); REPO=$(_jq '.repo_url'); BRANCH=$(_jq '.branch'); OUT_DIR=$(_jq '.output_dir // "build"')
+                AUTH_REPO=$(echo $REPO | sed "s/https:\/\//https:\/\/oauth2:${GH_PAT}@/")
+                
+                echo "🟢 Building: $NAME"
+                git clone --branch $BRANCH --single-branch $AUTH_REPO temp_node
+                pushd temp_node
+                npm install && npm run build
+                
+                # Move build output (dist/build) to artifacts so it becomes a website
+                if [ -d "$OUT_DIR" ]; then
+                    mv "$OUT_DIR" ../artifacts/node_to_apache/${NAME}
+                else
+                    echo "❌ Build failed or output dir '$OUT_DIR' missing"
+                    exit 1
+                fi
+                popd
+                rm -rf temp_node
+                echo "$NAME (Node)" >> built_node.txt
+            done
+          fi
+      - uses: actions/upload-artifact@v4
+        with: { name: node-sites, path: artifacts/node_to_apache, retention-days: 1 }
+      - uses: actions/upload-artifact@v4
+        with: { name: log-node, path: built_node.txt }
 
-      # --- B. INFRASTRUCTURE & DB SETUP ---
-      - name: Setup Infrastructure (Docker, Network, DB)
+  # --- JOB 1D: INFRASTRUCTURE OPERATIONS ---
+  infra-ops:
+    name: 🔧 Infra Ops (Backup & Pull)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SSH & Maintenance
         uses: appleboy/ssh-action@master
         env:
-          SITE24X7_KEY: ${{ secrets.SITE24X7_KEY }}
           DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: SITE24X7_KEY,DB_ROOT_PASSWORD
+          envs: DB_ROOT_PASSWORD
           script: |
-            AGENT_KEY="${SITE24X7_KEY}"
-            DB_PASS="${DB_ROOT_PASSWORD}"
             BASE="/opt/ecapps-hosting"
-            REPO_URL="https://github.com/ecappmakers/ecapps-production-iaas.git"
+            BACKUP_DIR="$BASE/backups"
+            DATE=$(date +%Y-%m-%d_%H%M)
             
-            # 🧹 1. CLEANUP STAGING: Remove old deployment artifacts
-            rm -rf $BASE/temp_deploy
-            
-            # 2. Structure Setup
+            # 1. Prepare Structure
+            mkdir -p $BACKUP_DIR
             mkdir -p $BASE/data/{war-uploads,php-sites,mysql-data,npm-data,portainer-data,tomcat-lib}
             mkdir -p $BASE/configs/apache
             
-            # 3. SELF-HEALING: Reset config file
+            # 2. 💾 DATABASE BACKUP
+            if [ -d "$BASE/data/mysql-data" ]; then
+                echo "💾 Backing up Database..."
+                # Check if container exists before dumping
+                if docker ps | grep -q main_db; then
+                    docker exec main_db mysqldump -u root --password=$DB_ROOT_PASSWORD --all-databases > $BACKUP_DIR/db_backup_$DATE.sql
+                    gzip $BACKUP_DIR/db_backup_$DATE.sql
+                    # Delete backups older than 7 days
+                    find $BACKUP_DIR -name "*.sql.gz" -mtime +7 -exec rm {} \;
+                else
+                    echo "⚠️ DB Container not running, skipping backup."
+                fi
+            fi
+
+            # 3. 🔄 SYNC INFRA CODE
+            cd $BASE
+            git fetch origin production && git reset --hard origin/production
+            
+            # 4. ⚡ PRE-PULL IMAGES (Quiet mode to prevent hangs)
+            echo "⚡ Pre-pulling latest Docker images..."
+            docker compose pull --quiet
+            
+            # 5. 🧹 SYSTEM PRUNE
+            docker system prune -f
+
+  # ======================================================
+  # 2. DEPLOY JOB (Waits for Code + Infra Prep)
+  # ======================================================
+
+  deploy:
+    name: 🚀 Deploy to VPS
+    needs: [build-java, build-php, build-node, infra-ops] # Waits for ALL 4
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      # Download All Artifacts
+      - uses: actions/download-artifact@v4
+        with: { name: java-wars, path: deploy_package/wars }
+      - uses: actions/download-artifact@v4
+        with: { name: php-sites, path: deploy_package/apache }
+      - uses: actions/download-artifact@v4
+        with: { name: node-sites, path: deploy_package/apache } # Merge Node into Apache
+      
+      # Download Logs
+      - uses: actions/download-artifact@v4
+        with: { name: log-java, path: logs }; continue-on-error: true
+      - uses: actions/download-artifact@v4
+        with: { name: log-php, path: logs }; continue-on-error: true
+      - uses: actions/download-artifact@v4
+        with: { name: log-node, path: logs }; continue-on-error: true
+
+      # START CONTAINERS
+      - name: Restart Infrastructure
+        uses: appleboy/ssh-action@master
+        env:
+          DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: DB_ROOT_PASSWORD
+          script: |
+            BASE="/opt/ecapps-hosting"
+            
+            # Clean Staging Area
+            rm -rf $BASE/temp_deploy
+            
+            # Reset Apache Config (Self-Healing)
             rm -rf $BASE/configs/apache/vhosts.conf
             touch $BASE/configs/apache/vhosts.conf
             
-            # 4. Git Infrastructure Sync
+            # Start/Update Containers
             cd $BASE
-            if [ ! -d ".git" ]; then
-                git init
-                git remote add origin $REPO_URL
-            fi
-            git fetch origin production
-            git reset --hard origin/production
-            
-            # 5. Generate Env
             cat versions.env > .env
-            echo "DB_ROOT_PASSWORD=$DB_PASS" >> .env
-            
-            # 6. Site24x7 Check
-            if [ ! -d "/opt/site24x7/monagent" ]; then
-               wget -q https://staticdownloads.site24x7.com/server/Site24x7FullStackAgent_LinuxIns.sh
-               bash Site24x7FullStackAgent_LinuxIns.sh -i -key=$AGENT_KEY -automation=true -apm_insight=false
-               rm Site24x7FullStackAgent_LinuxIns.sh
-            fi
-            
-            # 7. Start Containers
-            docker compose up -d --build
+            echo "DB_ROOT_PASSWORD=$DB_ROOT_PASSWORD" >> .env
+            docker compose up -d
 
-      # --- C. COPY ARTIFACTS ---
-      - name: Copy Files to Server
+      # COPY FILES
+      - name: Copy Files
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -183,8 +229,8 @@ jobs:
           source: "deploy_package/"
           target: "/opt/ecapps-hosting/temp_deploy/"
 
-      # --- D. INSTALL & AUTO-CONFIGURE ---
-      - name: Finalize Installation & Auto-Config
+      # INSTALL
+      - name: Finalize Installation
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -193,51 +239,86 @@ jobs:
           script: |
             BASE="/opt/ecapps-hosting"
             CONFIG_FILE="$BASE/configs/apache/vhosts.conf"
+            echo "# Auto-Generated Config" > $CONFIG_FILE
             
-            echo "# Auto-Generated Apache Config" > $CONFIG_FILE
-            
-            # 🧹 1. CLEANUP LIVE SITES: Wipe old sites to ensure perfect sync
-            # This deletes 'admin', 'www', or any folder not in the new deployment
-            echo "🧹 Clearing old PHP sites..."
+            # 🧹 Clean Old Sites
             rm -rf $BASE/data/php-sites/*
             
-            # 2. Process PHP Sites
-            for dir in $BASE/temp_deploy/deploy_package/apache/*/; do
-                [ -d "$dir" ] || continue
-                domain=$(basename "$dir")
-                safe_name="${domain//./_}_public_html"
-                
-                echo "⚙️ Configuring: $domain -> $safe_name"
-                
-                # Move to live folder
-                mv "$dir" "$BASE/data/php-sites/$safe_name"
-                
-                # Write VHost
-                echo "<VirtualHost *:80>" >> $CONFIG_FILE
-                echo "    ServerName $domain" >> $CONFIG_FILE
-                if [ "$domain" == "ecapps.in" ]; then
-                    echo "    ServerAlias www.ecapps.in" >> $CONFIG_FILE
-                fi
-                echo "    DocumentRoot /var/www/html/$safe_name" >> $CONFIG_FILE
-                echo "    <Directory /var/www/html/$safe_name>" >> $CONFIG_FILE
-                echo "        Options Indexes FollowSymLinks" >> $CONFIG_FILE
-                echo "        AllowOverride All" >> $CONFIG_FILE
-                echo "        Require all granted" >> $CONFIG_FILE
-                echo "    </Directory>" >> $CONFIG_FILE
-                echo "</VirtualHost>" >> $CONFIG_FILE
-                echo "" >> $CONFIG_FILE
-            done
+            # Process Websites (PHP + Node)
+            if [ -d "$BASE/temp_deploy/deploy_package/apache" ]; then
+                for dir in $BASE/temp_deploy/deploy_package/apache/*/; do
+                    [ -d "$dir" ] || continue
+                    domain=$(basename "$dir")
+                    safe_name="${domain//./_}_public_html"
+                    
+                    # Move to live folder
+                    mv "$dir" "$BASE/data/php-sites/$safe_name"
+                    
+                    # Write VHost Config
+                    echo "<VirtualHost *:80>" >> $CONFIG_FILE
+                    echo "    ServerName $domain" >> $CONFIG_FILE
+                    [ "$domain" == "ecapps.in" ] && echo "    ServerAlias www.ecapps.in" >> $CONFIG_FILE
+                    echo "    DocumentRoot /var/www/html/$safe_name" >> $CONFIG_FILE
+                    echo "    <Directory /var/www/html/$safe_name>" >> $CONFIG_FILE
+                    echo "        Options Indexes FollowSymLinks" >> $CONFIG_FILE
+                    echo "        AllowOverride All" >> $CONFIG_FILE
+                    echo "        Require all granted" >> $CONFIG_FILE
+                    echo "    </Directory>" >> $CONFIG_FILE
+                    echo "</VirtualHost>" >> $CONFIG_FILE
+                    echo "" >> $CONFIG_FILE
+                done
+            fi
+
+            # Process Java
+            if [ -d "$BASE/temp_deploy/deploy_package/wars" ]; then
+                mv $BASE/temp_deploy/deploy_package/wars/*.war $BASE/data/war-uploads/ || true
+            fi
             
-            # 3. Process Java WARs
-            mv $BASE/temp_deploy/deploy_package/wars/*.war $BASE/data/war-uploads/ || true
-            
-            # 4. Permissions
+            # Permissions & Restart
             chown -R 33:33 $BASE/data/php-sites/
             chmod -R 755 $BASE/data/php-sites/
             chmod -R 755 $BASE/data/war-uploads/
             
-            # 5. FORCE RESTART (Updates Config & File Mounts)
+            # Force Apache to reload config
             docker restart shared_apache
             
-            # 6. Cleanup Staging
+            # Cleanup
             rm -rf $BASE/temp_deploy
+
+  # ======================================================
+  # 3. NOTIFICATION JOB
+  # ======================================================
+
+  notify:
+    name: 🔔 Notify Telegram
+    needs: [deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: log-java, path: logs }; continue-on-error: true
+      - uses: actions/download-artifact@v4
+        with: { name: log-php, path: logs }; continue-on-error: true
+      - uses: actions/download-artifact@v4
+        with: { name: log-node, path: logs }; continue-on-error: true
+
+      - name: Send Telegram Message
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DEPLOY_STATUS: ${{ needs.deploy.result }}
+        run: |
+          if [ "$DEPLOY_STATUS" == "success" ]; then
+            EMOJI="✅"; TITLE="Deployment Successful"; MESSAGE="<b>Updated Apps:</b>"
+            if ls logs/*.txt 1> /dev/null 2>&1; then 
+                cat logs/*.txt > all_apps.txt
+                while IFS= read -r line; do MESSAGE+="%0A• $line"; done < all_apps.txt
+            else 
+                MESSAGE+="%0A(Infrastructure Only Update)"
+            fi
+          else
+            EMOJI="❌"; TITLE="Deployment Failed"; MESSAGE="⚠️ <b>Error:</b> Check GitHub Actions logs."
+          fi
+          
+          curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+            -d chat_id="$CHAT_ID" -d parse_mode="HTML" -d text="$EMOJI <b>$TITLE</b>%0A%0A$MESSAGE"
