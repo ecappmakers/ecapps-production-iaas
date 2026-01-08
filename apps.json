@@ -1,0 +1,20 @@
+{
+  "java": [
+  ],
+  "php": [
+    {
+      "name": "ecapps.in",
+      "repo_url": "https://github.com/ecappmakers/ecapps.git",
+      "branch": "main"
+    }
+  ],
+  "node": [
+    {
+      "name": "devsuite.ecapps.in",
+      "repo_url": "https://github.com/ecappmakers/DevSuite.git",
+      "branch": "master",
+      "build_cmd": "npm install && npm run build",
+      "output_dir": "build" 
+    }
+  ]
+}
