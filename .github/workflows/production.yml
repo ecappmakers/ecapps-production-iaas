@@ -139,19 +139,18 @@ jobs:
             BASE="/opt/ecapps-hosting"
             REPO_URL="https://github.com/ecappmakers/ecapps-production-iaas.git"
             
-            # ⚠️ CRITICAL FIX: Wipe the staging area clean before we start
-            # This prevents old/deleted folders from reappearing
+            # 🧹 1. CLEANUP STAGING: Remove old deployment artifacts
             rm -rf $BASE/temp_deploy
             
-            # 1. Structure Setup
+            # 2. Structure Setup
             mkdir -p $BASE/data/{war-uploads,php-sites,mysql-data,npm-data,portainer-data,tomcat-lib}
             mkdir -p $BASE/configs/apache
             
-            # 2. SELF-HEALING: Reset config file
+            # 3. SELF-HEALING: Reset config file
             rm -rf $BASE/configs/apache/vhosts.conf
             touch $BASE/configs/apache/vhosts.conf
             
-            # 3. Git Infrastructure Sync
+            # 4. Git Infrastructure Sync
             cd $BASE
             if [ ! -d ".git" ]; then
                 git init
@@ -160,18 +159,18 @@ jobs:
             git fetch origin production
             git reset --hard origin/production
             
-            # 4. Generate Env
+            # 5. Generate Env
             cat versions.env > .env
             echo "DB_ROOT_PASSWORD=$DB_PASS" >> .env
             
-            # 5. Site24x7 Check
+            # 6. Site24x7 Check
             if [ ! -d "/opt/site24x7/monagent" ]; then
                wget -q https://staticdownloads.site24x7.com/server/Site24x7FullStackAgent_LinuxIns.sh
                bash Site24x7FullStackAgent_LinuxIns.sh -i -key=$AGENT_KEY -automation=true -apm_insight=false
                rm Site24x7FullStackAgent_LinuxIns.sh
             fi
             
-            # 6. Start Containers
+            # 7. Start Containers
             docker compose up -d --build
 
       # --- C. COPY ARTIFACTS ---
@@ -197,8 +196,12 @@ jobs:
             
             echo "# Auto-Generated Apache Config" > $CONFIG_FILE
             
-            # 1. Process PHP Sites
-            # Since we cleaned temp_deploy in Step B, ONLY current GitHub folders exist here now.
+            # 🧹 1. CLEANUP LIVE SITES: Wipe old sites to ensure perfect sync
+            # This deletes 'admin', 'www', or any folder not in the new deployment
+            echo "🧹 Clearing old PHP sites..."
+            rm -rf $BASE/data/php-sites/*
+            
+            # 2. Process PHP Sites
             for dir in $BASE/temp_deploy/deploy_package/apache/*/; do
                 [ -d "$dir" ] || continue
                 domain=$(basename "$dir")
@@ -206,8 +209,7 @@ jobs:
                 
                 echo "⚙️ Configuring: $domain -> $safe_name"
                 
-                # Clean old target folder & Move new one
-                rm -rf "$BASE/data/php-sites/$safe_name"
+                # Move to live folder
                 mv "$dir" "$BASE/data/php-sites/$safe_name"
                 
                 # Write VHost
@@ -226,16 +228,16 @@ jobs:
                 echo "" >> $CONFIG_FILE
             done
             
-            # 2. Process Java WARs
+            # 3. Process Java WARs
             mv $BASE/temp_deploy/deploy_package/wars/*.war $BASE/data/war-uploads/ || true
             
-            # 3. Permissions
+            # 4. Permissions
             chown -R 33:33 $BASE/data/php-sites/
             chmod -R 755 $BASE/data/php-sites/
             chmod -R 755 $BASE/data/war-uploads/
             
-            # 4. Reload Apache
-            docker exec shared_apache apachectl -k graceful
+            # 5. FORCE RESTART (Updates Config & File Mounts)
+            docker restart shared_apache
             
-            # Cleanup
+            # 6. Cleanup Staging
             rm -rf $BASE/temp_deploy
