@@ -291,8 +291,9 @@ jobs:
                 mv $BASE/temp_deploy/deploy_package/wars/*.war $BASE/data/war-uploads/ || true
             fi
             
-            # 5. 🏥 SELF-HEALING: Clean internal container state
-            docker exec shared_apache a2dissite 000-default || true
+            # 5. 🏥 AGGRESSIVE SELF-HEALING: Force Clean Internal State
+            # We use 'rm -f' because a2dissite fails when the file is not a symlink
+            docker exec shared_apache rm -f /etc/apache2/sites-enabled/000-default.conf || true
             docker exec shared_apache a2enmod rewrite || true
             
             # 6. Permissions & Hard Restart
