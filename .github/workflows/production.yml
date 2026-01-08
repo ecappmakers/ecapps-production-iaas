@@ -11,7 +11,6 @@ jobs:
   # 1. PARALLEL JOBS (Code Builds + Infra Ops)
   # ======================================================
 
-  # --- JOB 1A: BUILD JAVA WARs ---
   build-java:
     name: ☕ Build Java
     runs-on: ubuntu-latest
@@ -22,7 +21,6 @@ jobs:
         with:
           java-version: '11'
           distribution: 'zulu'
-          # Removed cache to prevent crash if repo has no java files initially
       
       - name: Process Java Apps
         env:
@@ -30,14 +28,11 @@ jobs:
         run: |
           mkdir -p artifacts/wars
           touch built_java.txt
-          
-          # Safety Check: Default to empty list if missing
           if jq -e '.java // [] | length > 0' apps.json > /dev/null; then
             for row in $(jq -r '.java[] | @base64' apps.json); do
                 _jq() { echo ${row} | base64 --decode | jq -r "${1}"; }
                 NAME=$(_jq '.name'); REPO=$(_jq '.repo_url'); BRANCH=$(_jq '.branch')
                 AUTH_REPO=$(echo $REPO | sed "s/https:\/\//https:\/\/oauth2:${GH_PAT}@/")
-                
                 echo "☕ Building: $NAME"
                 git clone --branch $BRANCH --single-branch $AUTH_REPO temp_java
                 pushd temp_java
@@ -47,20 +42,24 @@ jobs:
                 rm -rf temp_java
                 echo "$NAME (Java)" >> built_java.txt
             done
+            echo "HAS_JAVA=true" >> $GITHUB_ENV
           else
-            echo "⚠️ No Java apps configured. Skipping."
+            echo "HAS_JAVA=false" >> $GITHUB_ENV
           fi
-      - uses: actions/upload-artifact@v4
+      
+      - name: Upload Java Artifacts
+        if: env.HAS_JAVA == 'true'
+        uses: actions/upload-artifact@v4
         with:
           name: java-wars
           path: artifacts/wars
           retention-days: 1
+      
       - uses: actions/upload-artifact@v4
         with:
           name: log-java
           path: built_java.txt
 
-  # --- JOB 1B: PACKAGE PHP SITES ---
   build-php:
     name: 🐘 Package PHP
     runs-on: ubuntu-latest
@@ -72,32 +71,34 @@ jobs:
         run: |
           mkdir -p artifacts/apache
           touch built_php.txt
-          
           if jq -e '.php // [] | length > 0' apps.json > /dev/null; then
             for row in $(jq -r '.php[] | @base64' apps.json); do
                 _jq() { echo ${row} | base64 --decode | jq -r "${1}"; }
                 NAME=$(_jq '.name'); REPO=$(_jq '.repo_url'); BRANCH=$(_jq '.branch')
                 AUTH_REPO=$(echo $REPO | sed "s/https:\/\//https:\/\/oauth2:${GH_PAT}@/")
-                
                 echo "🐘 Cloning: $NAME"
                 git clone --branch $BRANCH --single-branch $AUTH_REPO artifacts/apache/${NAME}
                 rm -rf artifacts/apache/${NAME}/.git
                 echo "$NAME (PHP)" >> built_php.txt
             done
+            echo "HAS_PHP=true" >> $GITHUB_ENV
           else
-            echo "⚠️ No PHP apps configured. Skipping."
+            echo "HAS_PHP=false" >> $GITHUB_ENV
           fi
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload PHP Artifacts
+        if: env.HAS_PHP == 'true'
+        uses: actions/upload-artifact@v4
         with:
           name: php-sites
           path: artifacts/apache
           retention-days: 1
+          
       - uses: actions/upload-artifact@v4
         with:
           name: log-php
           path: built_php.txt
 
-  # --- JOB 1C: BUILD NODE.JS APPS (With JQ Fix + Debugging) ---
   build-node:
     name: 🟢 Build Node.js
     runs-on: ubuntu-latest
@@ -112,69 +113,44 @@ jobs:
         run: |
           mkdir -p artifacts/node_to_apache
           touch built_node.txt
-          
           if jq -e '.node // [] | length > 0' apps.json > /dev/null; then
             for row in $(jq -r '.node[] | @base64' apps.json); do
-                # ⚠️ FIXED: Added quotes "${1}" to handle spaces in default values
                 _jq() { echo ${row} | base64 --decode | jq -r "${1}"; }
-                
-                NAME=$(_jq '.name')
-                REPO=$(_jq '.repo_url')
-                BRANCH=$(_jq '.branch')
-                # Defaults to "build" if output_dir is missing
-                OUT_DIR=$(_jq '.output_dir // "build"')
-                
+                NAME=$(_jq '.name'); REPO=$(_jq '.repo_url'); BRANCH=$(_jq '.branch'); OUT_DIR=$(_jq '.output_dir // "build"')
                 AUTH_REPO=$(echo $REPO | sed "s/https:\/\//https:\/\/oauth2:${GH_PAT}@/")
-                
-                echo "---------------------------------------------------"
-                echo "🟢 Starting Build: $NAME"
-                echo "ℹ️  Repo: $REPO"
-                echo "ℹ️  Target Output Dir: $OUT_DIR"
-                
+                echo "🟢 Building: $NAME"
                 git clone --branch $BRANCH --single-branch $AUTH_REPO temp_node
                 pushd temp_node
-                
-                echo "📦 Installing Dependencies..."
-                npm install
-                
-                echo "🏗️  Running Build..."
-                npm run build
-                
-                # --- DEBUG LOGGING ---
-                echo "🔍 DEBUG: Files generated after build:"
-                ls -F
-                if [ -d "dist" ]; then echo "Found 'dist' folder"; fi
-                if [ -d "build" ]; then echo "Found 'build' folder"; fi
-                # ---------------------
-                
+                npm install && npm run build
                 if [ -d "$OUT_DIR" ]; then
-                    echo "✅ Found output folder '$OUT_DIR'. Moving..."
                     mv "$OUT_DIR" ../artifacts/node_to_apache/${NAME}
                 else
-                    echo "❌ CRITICAL ERROR: Output folder '$OUT_DIR' not found!"
-                    echo "👉 Check the debug output above. If your app uses 'dist', update apps.json to: \"output_dir\": \"dist\""
-                    exit 1
+                    echo "❌ Error: $OUT_DIR missing" && exit 1
                 fi
                 popd
                 rm -rf temp_node
                 echo "$NAME (Node)" >> built_node.txt
             done
+            echo "HAS_NODE=true" >> $GITHUB_ENV
           else
-             echo "⚠️ No Node apps configured. Skipping."
+            echo "HAS_NODE=false" >> $GITHUB_ENV
           fi
-      - uses: actions/upload-artifact@v4
+          
+      - name: Upload Node Artifacts
+        if: env.HAS_NODE == 'true'
+        uses: actions/upload-artifact@v4
         with:
           name: node-sites
           path: artifacts/node_to_apache
           retention-days: 1
+          
       - uses: actions/upload-artifact@v4
         with:
           name: log-node
           path: built_node.txt
 
-  # --- JOB 1D: INFRASTRUCTURE OPERATIONS ---
   infra-ops:
-    name: 🔧 Infra Ops (Backup & Pull)
+    name: 🔧 Infra Ops
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -191,37 +167,19 @@ jobs:
             BASE="/opt/ecapps-hosting"
             BACKUP_DIR="$BASE/backups"
             DATE=$(date +%Y-%m-%d_%H%M)
-            
-            # 1. Prepare Structure
-            mkdir -p $BACKUP_DIR
-            mkdir -p $BASE/data/{war-uploads,php-sites,mysql-data,npm-data,portainer-data,tomcat-lib}
-            mkdir -p $BASE/configs/apache
-            
-            # 2. 💾 DATABASE BACKUP
-            if [ -d "$BASE/data/mysql-data" ]; then
-                echo "💾 Backing up Database..."
-                if docker ps | grep -q main_db; then
-                    docker exec main_db mysqldump -u root --password=$DB_ROOT_PASSWORD --all-databases > $BACKUP_DIR/db_backup_$DATE.sql
-                    gzip $BACKUP_DIR/db_backup_$DATE.sql
-                    find $BACKUP_DIR -name "*.sql.gz" -mtime +7 -exec rm {} \;
-                else
-                    echo "⚠️ DB Container not running, skipping backup."
-                fi
+            mkdir -p $BACKUP_DIR $BASE/data/{war-uploads,php-sites,mysql-data,npm-data,portainer-data,tomcat-lib} $BASE/configs/apache
+            if [ -d "$BASE/data/mysql-data" ] && docker ps | grep -q main_db; then
+                docker exec main_db mysqldump -u root --password=$DB_ROOT_PASSWORD --all-databases > $BACKUP_DIR/db_backup_$DATE.sql
+                gzip $BACKUP_DIR/db_backup_$DATE.sql
+                find $BACKUP_DIR -name "*.sql.gz" -mtime +7 -exec rm {} \;
             fi
-
-            # 3. 🔄 SYNC INFRA CODE
             cd $BASE
             git fetch origin production && git reset --hard origin/production
-            
-            # 4. ⚡ PRE-PULL IMAGES (Quiet)
-            echo "⚡ Pre-pulling latest Docker images..."
             docker compose pull --quiet
-            
-            # 5. 🧹 SYSTEM PRUNE
             docker system prune -f
 
   # ======================================================
-  # 2. DEPLOY JOB (Waits for Code + Infra Prep)
+  # 2. DEPLOY JOB (With Safety Checks)
   # ======================================================
 
   deploy:
@@ -231,42 +189,34 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      # Download Artifacts
-      - uses: actions/download-artifact@v4
+      - name: Download Java
+        if: jq -e '.java // [] | length > 0' apps.json > /dev/null
+        uses: actions/download-artifact@v4
         with:
           name: java-wars
           path: deploy_package/wars
 
-      - uses: actions/download-artifact@v4
+      - name: Download PHP
+        if: jq -e '.php // [] | length > 0' apps.json > /dev/null
+        uses: actions/download-artifact@v4
         with:
           name: php-sites
           path: deploy_package/apache
 
-      - uses: actions/download-artifact@v4
+      - name: Download Node
+        if: jq -e '.node // [] | length > 0' apps.json > /dev/null
+        uses: actions/download-artifact@v4
         with:
           name: node-sites
           path: deploy_package/apache
 
-      # Download Logs (Corrected YAML Syntax)
       - uses: actions/download-artifact@v4
-        with:
-          name: log-java
-          path: logs
-        continue-on-error: true
-
+        with: { name: log-java, path: logs }
       - uses: actions/download-artifact@v4
-        with:
-          name: log-php
-          path: logs
-        continue-on-error: true
-
+        with: { name: log-php, path: logs }
       - uses: actions/download-artifact@v4
-        with:
-          name: log-node
-          path: logs
-        continue-on-error: true
+        with: { name: log-node, path: logs }
 
-      # START CONTAINERS
       - name: Restart Infrastructure
         uses: appleboy/ssh-action@master
         env:
@@ -278,21 +228,13 @@ jobs:
           envs: DB_ROOT_PASSWORD
           script: |
             BASE="/opt/ecapps-hosting"
-            
-            # Clean Staging
-            rm -rf $BASE/temp_deploy
-            
-            # Reset Apache Config
-            rm -rf $BASE/configs/apache/vhosts.conf
+            rm -rf $BASE/temp_deploy $BASE/configs/apache/vhosts.conf
             touch $BASE/configs/apache/vhosts.conf
-            
-            # Start/Update
             cd $BASE
             cat versions.env > .env
             echo "DB_ROOT_PASSWORD=$DB_ROOT_PASSWORD" >> .env
             docker compose up -d
 
-      # COPY FILES
       - name: Copy Files
         uses: appleboy/scp-action@master
         with:
@@ -302,7 +244,6 @@ jobs:
           source: "deploy_package/"
           target: "/opt/ecapps-hosting/temp_deploy/"
 
-      # INSTALL
       - name: Finalize Installation
         uses: appleboy/ssh-action@master
         with:
@@ -313,19 +254,13 @@ jobs:
             BASE="/opt/ecapps-hosting"
             CONFIG_FILE="$BASE/configs/apache/vhosts.conf"
             echo "# Auto-Generated Config" > $CONFIG_FILE
-            
-            # 🧹 Clean Old Sites
             rm -rf $BASE/data/php-sites/*
-            
-            # Process Websites
             if [ -d "$BASE/temp_deploy/deploy_package/apache" ]; then
                 for dir in $BASE/temp_deploy/deploy_package/apache/*/; do
                     [ -d "$dir" ] || continue
                     domain=$(basename "$dir")
                     safe_name="${domain//./_}_public_html"
-                    
                     mv "$dir" "$BASE/data/php-sites/$safe_name"
-                    
                     echo "<VirtualHost *:80>" >> $CONFIG_FILE
                     echo "    ServerName $domain" >> $CONFIG_FILE
                     [ "$domain" == "ecapps.in" ] && echo "    ServerAlias www.ecapps.in" >> $CONFIG_FILE
@@ -339,16 +274,11 @@ jobs:
                     echo "" >> $CONFIG_FILE
                 done
             fi
-
-            # Process Java
             if [ -d "$BASE/temp_deploy/deploy_package/wars" ]; then
                 mv $BASE/temp_deploy/deploy_package/wars/*.war $BASE/data/war-uploads/ || true
             fi
-            
-            # Permissions & Restart
             chown -R 33:33 $BASE/data/php-sites/
-            chmod -R 755 $BASE/data/php-sites/
-            chmod -R 755 $BASE/data/war-uploads/
+            chmod -R 755 $BASE/data/php-sites/ $BASE/data/war-uploads/
             docker restart shared_apache
             rm -rf $BASE/temp_deploy
 
@@ -363,22 +293,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
-        with:
-          name: log-java
-          path: logs
-        continue-on-error: true
-      
+        with: { name: log-java, path: logs }; continue-on-error: true
       - uses: actions/download-artifact@v4
-        with:
-          name: log-php
-          path: logs
-        continue-on-error: true
-      
+        with: { name: log-php, path: logs }; continue-on-error: true
       - uses: actions/download-artifact@v4
-        with:
-          name: log-node
-          path: logs
-        continue-on-error: true
+        with: { name: log-node, path: logs }; continue-on-error: true
 
       - name: Broadcast Message
         env:
@@ -389,22 +308,20 @@ jobs:
             EMOJI="✅"; TITLE="Deployment Successful"; MESSAGE="<b>Updated Apps:</b>"
             if ls logs/*.txt 1> /dev/null 2>&1; then 
                 cat logs/*.txt > all_apps.txt
-                while IFS= read -r line; do MESSAGE+="%0A• $line"; done < all_apps.txt
+                while IFS= read -r line; do
+                    [[ -z "${line// }" ]] && continue
+                    MESSAGE+="%0A• $line"
+                done < all_apps.txt
             else 
-                MESSAGE+="%0A(Infrastructure Only Update)"
+                MESSAGE+="%0A(Infrastructure Update Only)"
             fi
           else
             EMOJI="❌"; TITLE="Deployment Failed"; MESSAGE="⚠️ <b>Error:</b> Check GitHub Actions logs."
           fi
-          
           FINAL_MSG="$EMOJI <b>$TITLE</b>%0A%0A$MESSAGE"
-
-          # Fetch & Broadcast
-          echo "📡 Fetching subscribers..."
           UPDATES=$(curl -s "https://api.telegram.org/bot$BOT_TOKEN/getUpdates")
           CHAT_IDS=$(echo "$UPDATES" | jq -r '.result[].message.chat.id' | sort -u)
-          
-          if [ -z "$CHAT_IDS" ]; then
+          if [ -z "$CHAT_IDS" ] || [ "$CHAT_IDS" == "null" ]; then
              echo "⚠️ No active subscribers found."
           else
              for id in $CHAT_IDS; do
