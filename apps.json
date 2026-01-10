@@ -2,11 +2,6 @@
   "java": [
   ],
   "php": [
-    {
-      "name": "ecapps.in",
-      "repo_url": "https://github.com/ecappmakers/ecapps.git",
-      "branch": "main"
-    }
   ],
   "node": [
     {
