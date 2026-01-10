@@ -14,7 +14,7 @@
       "repo_url": "https://github.com/ecappmakers/ecapps.git",
       "branch": "main",
       "build_cmd": "npm install && npm run build --configuration production",
-      "output_dir": "dist" 
+      "output_dir": "dist/ecapps-single/browser" 
     },
     {
       "name": "devsuite.ecapps.in",
