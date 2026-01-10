@@ -15,7 +15,7 @@
       "branch": "main",
       "build_cmd": "npm install && npm run build --configuration production",
       "output_dir": "dist" 
-    }
+    },
     {
       "name": "devsuite.ecapps.in",
       "repo_url": "https://github.com/ecappmakers/DevSuite.git",
