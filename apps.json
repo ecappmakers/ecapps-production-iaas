@@ -16,7 +16,7 @@
       "repo_url": "https://github.com/ecappmakers/friends-electricals-home.git",
       "branch": "master",
       "build_cmd": "npm install && npm run build --configuration production",
-      "output_dir": "dist/friends-electricals-home/browser" 
+      "output_dir": "dist/friends-electricals-modern/browser" 
     },
     {
       "name": "devsuite.ecapps.in",
