@@ -279,7 +279,7 @@ jobs:
                     
                     echo "<VirtualHost *:80>" >> $CONFIG_FILE
                     echo "    ServerName $domain" >> $CONFIG_FILE
-                    [ "$domain" == "ecapps.in" ] && echo "    ServerAlias www.ecapps.in" >> $CONFIG_FILE
+                    echo "    ServerAlias www.$domain" >> $CONFIG_FILE
                     echo "    DocumentRoot /var/www/html/$safe_name" >> $CONFIG_FILE
                     echo "    <Directory /var/www/html/$safe_name>" >> $CONFIG_FILE
                     echo "        Options Indexes FollowSymLinks" >> $CONFIG_FILE
