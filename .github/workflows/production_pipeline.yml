@@ -143,6 +143,9 @@ jobs:
   # ======================================================
   # 4. DEPLOY TO VPS
   # ======================================================
+# ======================================================
+  # 4. DEPLOY TO VPS
+  # ======================================================
   deploy:
     needs: [plan, build-containers, build-static]
     runs-on: ubuntu-latest
@@ -154,6 +157,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       
+      # 1. Upload the Repo's docker-compose.yml (Base Infra)
       - name: Update Base Infra
         uses: appleboy/scp-action@master
         with:
@@ -163,16 +167,7 @@ jobs:
           source: docker-compose.yml
           target: /opt/ecapps-hosting/
 
-      - name: Apply Base Infra
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script: |
-            cd /opt/ecapps-hosting
-            docker compose -f docker-compose.yml up -d --remove-orphans
-
+      # 2. Generate Dynamic Compose & Deploy Both
       - name: Update Apps & DB
         uses: appleboy/ssh-action@master
         env:
@@ -185,9 +180,10 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: GH_USER,GH_TOKEN,DB_PASS
           script: |
+            # Self-Healing: Install jq if missing
             if ! command -v jq &> /dev/null; then
                 if [ "$EUID" -ne 0 ]; then
-                  echo "⚠️ jq missing and not root - cannot install automatically."
+                  echo "⚠️ jq missing - skipping install (not root)"
                 else
                   export DEBIAN_FRONTEND=noninteractive
                   apt-get update && apt-get install -y jq
@@ -197,28 +193,17 @@ jobs:
             BASE="/opt/ecapps-hosting"
             mkdir -p $BASE/data/sites $BASE/data/mysql $BASE/data/init_sql
             cd $BASE
-            
-            # Lowercase user for docker login
+
+            # Login to GHCR
             LOWER_USER=$(echo "$GH_USER" | tr '[:upper:]' '[:lower:]')
             echo $GH_TOKEN | docker login ghcr.io -u $LOWER_USER --password-stdin
 
+            # ---------------------------------------------------------
+            # GENERATE DYNAMIC COMPOSE FILE (Only for apps in apps.json)
+            # ---------------------------------------------------------
             cat > docker-compose.prod.yml <<EOF
             version: '3.8'
-            networks: { hosting_net: { external: true } }
             services:
-              db:
-                image: mariadb:10.11
-                container_name: main_db
-                restart: always
-                environment: { MYSQL_ROOT_PASSWORD: $DB_PASS }
-                volumes: [ "./data/mysql:/var/lib/mysql", "./data/init_sql:/docker-entrypoint-initdb.d" ]
-                networks: [ hosting_net ]
-              shared_web:
-                image: php:8.1-apache
-                container_name: shared_web
-                restart: always
-                volumes: [ "./data/sites:/var/www/html" ]
-                networks: [ hosting_net ]
             EOF
 
             CONTAINER_COUNT=$(jq '[.apps[] | select(.type=="container")] | length' apps.json)
@@ -227,13 +212,13 @@ jobs:
                 for row in $(jq -r '.apps[] | select(.type=="container") | @base64' apps.json); do
                   _jq() { echo $row | base64 --decode | jq -r "$1"; }
                   NAME=$(_jq '.name')
-                  # Lowercase user in image path
                   IMAGE="ghcr.io/$LOWER_USER/$NAME:latest"
 
                   echo "  $NAME:" >> docker-compose.prod.yml
                   echo "    image: $IMAGE" >> docker-compose.prod.yml
                   echo "    container_name: $NAME" >> docker-compose.prod.yml
                   echo "    restart: always" >> docker-compose.prod.yml
+                  # Ensure they attach to the network defined in your base docker-compose.yml
                   echo "    networks: [hosting_net]" >> docker-compose.prod.yml
                   echo "    environment:" >> docker-compose.prod.yml
                   
@@ -244,12 +229,21 @@ jobs:
                     echo "      - $KEY=$VAL" >> docker-compose.prod.yml
                   done
                 done
+            else
+               # If no containers, write empty services to prevent errors
+               echo "  # No dynamic containers" >> docker-compose.prod.yml
             fi
 
-            docker compose -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+            # ---------------------------------------------------------
+            # DEPLOY BOTH FILES TOGETHER
+            # ---------------------------------------------------------
+            # -f docker-compose.yml      <-- Loads Portainer, NPM, Redis form Repo
+            # -f docker-compose.prod.yml <-- Loads dynamic Apps from apps.json
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
 
+      # 3. Handle Static Sites (Unchanged)
       - uses: actions/download-artifact@v4
         if: needs.plan.outputs.has_statics == 'true'
         with: { pattern: static-site-*, path: temp_static, merge-multiple: false }
@@ -287,7 +281,7 @@ jobs:
                 done
                 rm -rf $BASE/temp_uploads
             fi
-
+            
   # ======================================================
   # 5. CONFIGURE PROXY
   # ======================================================
