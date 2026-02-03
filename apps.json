@@ -1,5 +1,5 @@
 {
-  "projects": [
+  "apps": [
     {
       "name": "ecapps.in",
       "type": "node",
