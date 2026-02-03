@@ -146,6 +146,7 @@ jobs:
   deploy:
     needs: [plan, build-containers, build-static]
     runs-on: ubuntu-latest
+    # Run if build jobs succeeded or were skipped (but not failed)
     if: |
       always() && 
       !contains(needs.build-containers.result, 'failure') && 
@@ -185,6 +186,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: GH_USER,GH_TOKEN,DB_PASS
           script: |
+            # Check for jq, install if missing and user is root
             if ! command -v jq &> /dev/null; then
                 if [ "$EUID" -ne 0 ]; then
                   echo "⚠️ jq missing and not root - cannot install automatically."
@@ -359,7 +361,7 @@ jobs:
           echo "EOF" >> $GITHUB_ENV
 
       - name: Telegram
-        # FIX: Wrapped secrets in ${{ }} to satisfy parser
+        # ✅ FIXED: Secrets wrapped in ${{ }} for if condition
         if: ${{ secrets.TELEGRAM_TOKEN != '' }}
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -369,7 +371,7 @@ jobs:
             -d chat_id="$CHAT_ID" -d parse_mode="HTML" -d text="$EMOJI <b>$TITLE</b>%0A%0A$TELEGRAM_MSG"
 
       - name: Send Email
-        # FIX: Wrapped secrets in ${{ }} to satisfy parser
+        # ✅ FIXED: Secrets wrapped in ${{ }} for if condition
         if: ${{ secrets.EMAIL_USER != '' }}
         uses: dawidd6/action-send-mail@v3
         with:
