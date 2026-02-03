@@ -8,7 +8,7 @@ on:
 
 jobs:
   # ======================================================
-  # 1. PLAN (Generate the list of apps dynamically)
+  # 1. PLAN (Robust Version)
   # ======================================================
   plan:
     runs-on: ubuntu-latest
@@ -18,23 +18,51 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      - name: Debug & Validate JSON
+        run: |
+          ls -la
+          if [ ! -f apps.json ]; then
+            echo "❌ Error: apps.json not found in root!"
+            exit 1
+          fi
+          # Check if valid JSON
+          if ! jq . apps.json > /dev/null; then
+             echo "❌ Error: apps.json contains invalid JSON syntax!"
+             exit 1
+          fi
+
       - id: set-matrix
         run: |
-          # FIX: Escaping internal quotes for valid JSON generation
-          echo "containers=$(jq -c '{include: [.apps[] | select(.type==\"container\")]}' apps.json)" >> $GITHUB_OUTPUT
-          echo "statics=$(jq -c '{include: [.apps[] | select(.type==\"static\")]}' apps.json)" >> $GITHUB_OUTPUT
+          # 1. Generate Container Matrix
+          # We use single quotes for the jq filter to avoid escaping issues
+          CONTAINERS=$(jq -c '{include: [.apps[] | select(.type=="container")]}' apps.json)
+          
+          # Fallback: If jq returns empty or null, set a valid empty matrix
+          if [ -z "$CONTAINERS" ] || [ "$CONTAINERS" == "null" ]; then
+             CONTAINERS='{"include":[]}'
+          fi
+          echo "containers=$CONTAINERS" >> $GITHUB_OUTPUT
+          echo "✅ Containers identified: $CONTAINERS"
+
+          # 2. Generate Static Matrix
+          STATICS=$(jq -c '{include: [.apps[] | select(.type=="static")]}' apps.json)
+          
+          if [ -z "$STATICS" ] || [ "$STATICS" == "null" ]; then
+             STATICS='{"include":[]}'
+          fi
+          echo "statics=$STATICS" >> $GITHUB_OUTPUT
+          echo "✅ Static Sites identified: $STATICS"
 
   # ======================================================
-  # 2. BUILD CONTAINERS (Java/Node Backends)
+  # 2. BUILD CONTAINERS
   # ======================================================
   build-containers:
     needs: plan
     runs-on: ubuntu-latest
-    # FIX: Removed quotes and ${{}} for native expression evaluation
-    if: fromJson(needs.plan.outputs.containers).include[0]
-
+    # Safe check: Only run if the 'include' array is not empty
+    if: ${{ fromJson(needs.plan.outputs.containers).include[0] }}
+    
     strategy:
-      # FIX: Removed quotes so it parses as an Object, not a String
       matrix: ${{ fromJson(needs.plan.outputs.containers) }}
 
     steps:
@@ -64,16 +92,14 @@ jobs:
           path: built_apps.txt
 
   # ======================================================
-  # 3. BUILD STATIC SITES (Angular/React/HTML)
+  # 3. BUILD STATIC SITES
   # ======================================================
   build-static:
     needs: plan
     runs-on: ubuntu-latest
-    # FIX: Removed quotes
-    if: fromJson(needs.plan.outputs.statics).include[0]
-
+    if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
+    
     strategy:
-      # FIX: Removed quotes
       matrix: ${{ fromJson(needs.plan.outputs.statics) }}
 
     steps:
@@ -110,7 +136,7 @@ jobs:
           path: built_static.txt
 
   # ======================================================
-  # 4. DEPLOY TO VPS
+  # 4. DEPLOY
   # ======================================================
   deploy:
     needs: [build-containers, build-static]
@@ -120,7 +146,6 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      # A. Update Base Infrastructure
       - name: Update Base Infra
         uses: appleboy/scp-action@master
         with:
@@ -140,7 +165,6 @@ jobs:
             cd /opt/ecapps-hosting
             docker compose -f docker-compose.yml up -d --remove-orphans
 
-      # B. Update Apps & Database
       - name: Update Apps & DB
         uses: appleboy/ssh-action@master
         env:
@@ -185,6 +209,7 @@ jobs:
                 networks: [hosting_net]
             EOF
 
+            # SAFE JSON PARSING
             for row in $(jq -r '.apps[] | select(.type=="container") | @base64' apps.json); do
               _jq() { echo $row | base64 --decode | jq -r "$1"; }
               NAME=$(_jq '.name')
@@ -209,16 +234,15 @@ jobs:
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
 
-      # C. Sync Static Files
       - uses: actions/download-artifact@v4
-        if: fromJson(needs.plan.outputs.statics).include[0]
+        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
         with:
           pattern: static-site-*
           path: temp_static
           merge-multiple: false
 
       - uses: appleboy/scp-action@master
-        if: fromJson(needs.plan.outputs.statics).include[0]
+        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -227,7 +251,7 @@ jobs:
           target: /opt/ecapps-hosting/temp_uploads
 
       - name: Finalize Static
-        if: fromJson(needs.plan.outputs.statics).include[0]
+        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -245,7 +269,6 @@ jobs:
                 rsync -av --delete "$dir" "$BASE/data/sites/$DOMAIN/"
               fi
             done
-
             rm -rf $BASE/temp_uploads
 
   # ======================================================
@@ -275,7 +298,7 @@ jobs:
           path: npm_log.txt
 
   # ======================================================
-  # 6. NOTIFICATIONS (RESTORED & FIXED)
+  # 6. NOTIFICATIONS
   # ======================================================
   notify:
     needs: [deploy, configure-proxy]
