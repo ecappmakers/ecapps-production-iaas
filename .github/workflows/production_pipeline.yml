@@ -17,18 +17,19 @@ jobs:
       - uses: actions/checkout@v3
       - id: set-matrix
         run: |
-          # Added backslash escapes \" for inner quotes to ensure valid JSON string
-          echo "containers=$(jq -c '{include: [.apps[] | select(.type=="container")]}' apps.json)" >> $GITHUB_OUTPUT
-          echo "statics=$(jq -c '{include: [.apps[] | select(.type=="static")]}' apps.json)" >> $GITHUB_OUTPUT
+          # FIX: Escaped inner quotes \"container\" so Bash doesn't break
+          echo "containers=$(jq -c '{include: [.apps[] | select(.type==\"container\")]}' apps.json)" >> $GITHUB_OUTPUT
+          echo "statics=$(jq -c '{include: [.apps[] | select(.type==\"static\")]}' apps.json)" >> $GITHUB_OUTPUT
 
   # 2. BUILD CONTAINERS
   build-containers:
     needs: plan
     runs-on: ubuntu-latest
-    # FIX: Added single quotes around the if condition
+    # FIX: Quoted the IF condition
     if: '${{ fromJson(needs.plan.outputs.containers).include[0] }}'
     strategy:
-      matrix: ${{ fromJson(needs.plan.outputs.containers) }}
+      # FIX: Quoted the MATRIX definition (This was the syntax error)
+      matrix: '${{ fromJson(needs.plan.outputs.containers) }}'
     steps:
       - uses: actions/checkout@v3
         with:
@@ -53,10 +54,11 @@ jobs:
   build-static:
     needs: plan
     runs-on: ubuntu-latest
-    # FIX: Added single quotes around the if condition
+    # FIX: Quoted the IF condition
     if: '${{ fromJson(needs.plan.outputs.statics).include[0] }}'
     strategy:
-      matrix: ${{ fromJson(needs.plan.outputs.statics) }}
+      # FIX: Quoted the MATRIX definition
+      matrix: '${{ fromJson(needs.plan.outputs.statics) }}'
     steps:
       - uses: actions/checkout@v3
         with:
