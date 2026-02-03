@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   # ======================================================
-  # 1. PLAN (Fail-Safe JSON Generation)
+  # 1. PLAN (Smart Detection)
   # ======================================================
   plan:
     runs-on: ubuntu-latest
@@ -27,8 +27,12 @@ jobs:
       - id: set-matrix
         name: Generate Matrices
         run: |
-          # 1. Generate Container Matrix
-          CONTAINERS=$(jq -c '{include: [.apps[] | select(.type=="container")]}' apps.json)
+          echo "📂 Debug: Listing files in root..."
+          ls -la
+
+          # 1. Generate Container Matrix (Case Insensitive)
+          # Accepts type="container" or "backend"
+          CONTAINERS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("container|backend"))]}' apps.json)
           COUNT_C=$(echo "$CONTAINERS" | jq '.include | length')
           
           echo "containers=$CONTAINERS" >> $GITHUB_OUTPUT
@@ -40,8 +44,9 @@ jobs:
             echo "⚠️ No containers found."
           fi
 
-          # 2. Generate Static Matrix
-          STATICS=$(jq -c '{include: [.apps[] | select(.type=="static")]}' apps.json)
+          # 2. Generate Static Matrix (Case Insensitive)
+          # Accepts type="static" or "node" (for your Angular/React apps)
+          STATICS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("static|node"))]}' apps.json)
           COUNT_S=$(echo "$STATICS" | jq '.include | length')
 
           echo "statics=$STATICS" >> $GITHUB_OUTPUT
@@ -143,9 +148,6 @@ jobs:
   # ======================================================
   # 4. DEPLOY TO VPS
   # ======================================================
-# ======================================================
-  # 4. DEPLOY TO VPS
-  # ======================================================
   deploy:
     needs: [plan, build-containers, build-static]
     runs-on: ubuntu-latest
@@ -157,14 +159,15 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       
-      # 1. Upload the Repo's docker-compose.yml (Base Infra)
+      # 1. Upload Base Infra AND apps.json (CRITICAL FIX)
       - name: Update Base Infra
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: docker-compose.yml
+          # ⚠️ FIX: Uploading apps.json so the VPS can read it
+          source: "docker-compose.yml,apps.json"
           target: /opt/ecapps-hosting/
 
       # 2. Generate Dynamic Compose & Deploy Both
@@ -194,12 +197,18 @@ jobs:
             mkdir -p $BASE/data/sites $BASE/data/mysql $BASE/data/init_sql
             cd $BASE
 
+            # Verify apps.json exists now
+            if [ ! -f "apps.json" ]; then
+               echo "❌ Error: apps.json missing on server! Check SCP step."
+               exit 1
+            fi
+
             # Login to GHCR
             LOWER_USER=$(echo "$GH_USER" | tr '[:upper:]' '[:lower:]')
             echo $GH_TOKEN | docker login ghcr.io -u $LOWER_USER --password-stdin
 
             # ---------------------------------------------------------
-            # GENERATE DYNAMIC COMPOSE FILE (Only for apps in apps.json)
+            # GENERATE DYNAMIC COMPOSE FILE
             # ---------------------------------------------------------
             cat > docker-compose.prod.yml <<EOF
             version: '3.8'
@@ -218,7 +227,6 @@ jobs:
                   echo "    image: $IMAGE" >> docker-compose.prod.yml
                   echo "    container_name: $NAME" >> docker-compose.prod.yml
                   echo "    restart: always" >> docker-compose.prod.yml
-                  # Ensure they attach to the network defined in your base docker-compose.yml
                   echo "    networks: [hosting_net]" >> docker-compose.prod.yml
                   echo "    environment:" >> docker-compose.prod.yml
                   
@@ -230,20 +238,17 @@ jobs:
                   done
                 done
             else
-               # If no containers, write empty services to prevent errors
                echo "  # No dynamic containers" >> docker-compose.prod.yml
             fi
 
             # ---------------------------------------------------------
-            # DEPLOY BOTH FILES TOGETHER
+            # DEPLOY BOTH FILES TOGETHER (Overlay Strategy)
             # ---------------------------------------------------------
-            # -f docker-compose.yml      <-- Loads Portainer, NPM, Redis form Repo
-            # -f docker-compose.prod.yml <-- Loads dynamic Apps from apps.json
             docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
 
-      # 3. Handle Static Sites (Unchanged)
+      # 3. Handle Static Sites
       - uses: actions/download-artifact@v4
         if: needs.plan.outputs.has_statics == 'true'
         with: { pattern: static-site-*, path: temp_static, merge-multiple: false }
@@ -281,7 +286,7 @@ jobs:
                 done
                 rm -rf $BASE/temp_uploads
             fi
-            
+
   # ======================================================
   # 5. CONFIGURE PROXY
   # ======================================================
@@ -311,7 +316,6 @@ jobs:
     runs-on: ubuntu-latest
     
     # ✅ FIX: Map secrets to env vars at the JOB level.
-    # This bypasses the parser error because 'env' context is always allowed in 'if'.
     env:
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       EMAIL_USER: ${{ secrets.EMAIL_USER }}
@@ -360,18 +364,15 @@ jobs:
           echo "EOF" >> $GITHUB_ENV
 
       - name: Telegram
-        # ✅ FIX: Check the 'env' context, which is syntax-safe
         if: ${{ env.TELEGRAM_TOKEN != '' }}
         env:
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Token is already in job env, but we can access it here
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         run: |
           curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
             -d chat_id="$CHAT_ID" -d parse_mode="HTML" -d text="$EMOJI <b>$TITLE</b>%0A%0A$TELEGRAM_MSG"
 
       - name: Send Email
-        # ✅ FIX: Check the 'env' context, which is syntax-safe
         if: ${{ env.EMAIL_USER != '' }}
         uses: dawidd6/action-send-mail@v3
         with:
