@@ -1,0 +1,308 @@
+name: 🚀 Production Pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "production" ]
+    # ⚠️ RESTRICTED: Only runs if you edit these specific files
+    paths: [ "apps.json", "docker-compose.yml" ]
+
+jobs:
+  # ==========================================
+  # 1. PLAN
+  # ==========================================
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      containers: ${{ steps.set-matrix.outputs.containers }}
+      statics: ${{ steps.set-matrix.outputs.statics }}
+    steps:
+      - uses: actions/checkout@v3
+      - id: set-matrix
+        run: |
+          echo "containers=$(jq -c '{include: [.apps[] | select(.type=="container")]}' apps.json)" >> $GITHUB_OUTPUT
+          echo "statics=$(jq -c '{include: [.apps[] | select(.type=="static")]}' apps.json)" >> $GITHUB_OUTPUT
+
+  # ==========================================
+  # 2. BUILD CONTAINERS (Java/Node Backend)
+  # ==========================================
+  build-containers:
+    needs: plan
+    runs-on: ubuntu-latest
+    if: ${{ fromJson(needs.plan.outputs.containers).include[0] }}
+    strategy:
+      matrix: ${{ fromJson(needs.plan.outputs.containers) }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          repository: ${{ matrix.repo_url }}
+          ref: ${{ matrix.branch }}
+          token: ${{ secrets.GH_PAT }}
+      - uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}:latest
+      - run: echo "${{ matrix.name }} (Container)" >> built_apps.txt
+      - uses: actions/upload-artifact@v4
+        with: { name: log-container-${{ matrix.name }}, path: built_apps.txt }
+
+  # ==========================================
+  # 3. BUILD STATIC SITES (Frontend)
+  # ==========================================
+  build-static:
+    needs: plan
+    runs-on: ubuntu-latest
+    if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
+    strategy:
+      matrix: ${{ fromJson(needs.plan.outputs.statics) }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          repository: ${{ matrix.repo_url }}
+          ref: ${{ matrix.branch }}
+          token: ${{ secrets.GH_PAT }}
+          path: source_code
+      - name: Build
+        run: |
+          mkdir -p output
+          cd source_code
+          ${{ matrix.build_cmd }}
+          if [ -d "${{ matrix.output_dir }}" ]; then
+             cp -r ${{ matrix.output_dir }}/* ../output/
+          else
+             echo "❌ Output dir ${{ matrix.output_dir }} missing!"; exit 1
+          fi
+          echo "${{ matrix.name }} (Static)" >> ../built_static.txt
+      - uses: actions/upload-artifact@v4
+        with: { name: static-site-${{ matrix.name }}, path: output }
+      - uses: actions/upload-artifact@v4
+        with: { name: log-static-${{ matrix.name }}, path: built_static.txt }
+
+  # ==========================================
+  # 4. DEPLOY INFRASTRUCTURE
+  # ==========================================
+  deploy:
+    needs: [build-containers, build-static]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - uses: actions/checkout@v3
+      
+      # A. Deploy Base Infrastructure (NPM/Portainer)
+      # This updates the permanent services if docker-compose.yml changed
+      - name: Update Base Infra
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "docker-compose.yml"
+          target: "/opt/ecapps-hosting/"
+
+      - name: Apply Base Infra
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+             cd /opt/ecapps-hosting
+             docker compose -f docker-compose.yml up -d --remove-orphans
+
+      # B. Deploy Apps & DB (Dynamic Infrastructure)
+      - name: Update Apps & DB
+        uses: appleboy/ssh-action@master
+        env:
+          GH_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DB_PASS: ${{ secrets.DB_ROOT_PASSWORD }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: GH_USER,GH_TOKEN,DB_PASS
+          script: |
+             BASE="/opt/ecapps-hosting"
+             mkdir -p $BASE/data/sites $BASE/data/mysql $BASE/data/init_sql
+             cd $BASE
+             echo $GH_TOKEN | docker login ghcr.io -u $GH_USER --password-stdin
+             
+             # 1. Generate Dynamic Compose File
+             # Note: hosting_net is 'external: true' because Base Infra created it
+             cat > docker-compose.prod.yml <<EOF
+             version: '3.8'
+             networks: { hosting_net: { external: true } }
+             services:
+               db:
+                 image: mariadb:10.11
+                 container_name: main_db
+                 restart: always
+                 environment: { MYSQL_ROOT_PASSWORD: $DB_PASS }
+                 volumes: [ "./data/mysql:/var/lib/mysql", "./data/init_sql:/docker-entrypoint-initdb.d" ]
+                 networks: [ hosting_net ]
+               shared_web:
+                 image: php:8.1-apache
+                 container_name: shared_web
+                 restart: always
+                 volumes: [ "./data/sites:/var/www/html" ]
+                 networks: [ hosting_net ]
+             EOF
+             
+             # 2. Append App Containers dynamically from JSON
+             cat <<JSON > apps.json
+             $(cat apps.json)
+             JSON
+             
+             for row in $(jq -r '.apps[] | select(.type=="container") | @base64' apps.json); do
+                 _jq() { echo ${row} | base64 --decode | jq -r "${1}"; }
+                 NAME=$(_jq '.name'); IMAGE="ghcr.io/${GH_USER,,}/$NAME:latest"
+                 
+                 echo "  $NAME:" >> docker-compose.prod.yml
+                 echo "    image: $IMAGE" >> docker-compose.prod.yml
+                 echo "    container_name: $NAME" >> docker-compose.prod.yml
+                 echo "    networks: [hosting_net]" >> docker-compose.prod.yml
+                 echo "    restart: always" >> docker-compose.prod.yml
+                 echo "    environment:" >> docker-compose.prod.yml
+                 
+                 echo ${row} | base64 --decode | jq -r '.env | to_entries | .[] | .key + "=" + .value' | while read line; do
+                    KEY=$(echo $line | cut -d'=' -f1); VAL=$(echo $line | cut -d'=' -f2)
+                    if [ "$VAL" == "DB_ROOT_PASSWORD" ]; then VAL="$DB_PASS"; fi
+                    echo "      - $KEY=$VAL" >> docker-compose.prod.yml
+                 done
+             done
+             
+             # 3. Deploy
+             docker compose -f docker-compose.prod.yml pull
+             docker compose -f docker-compose.prod.yml up -d --remove-orphans
+             docker image prune -f
+
+      # C. Sync Static Files (Zero Downtime)
+      - uses: actions/download-artifact@v4
+        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
+        with: { pattern: static-site-*, path: temp_static, merge-multiple: false }
+
+      - uses: appleboy/scp-action@master
+        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "temp_static/*"
+          target: "/opt/ecapps-hosting/temp_uploads"
+
+      - name: Finalize Static
+        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+             BASE="/opt/ecapps-hosting"
+             if [ -d "$BASE/temp_uploads/temp_static" ]; then
+                for dir in $BASE/temp_uploads/temp_static/*/; do
+                   [ -d "$dir" ] || continue
+                   SITE_NAME=$(basename "$dir" | sed 's/static-site-//')
+                   DOMAIN=$(jq -r ".apps[] | select(.name==\"$SITE_NAME\") | .domain" $BASE/apps.json)
+                   if [ ! -z "$DOMAIN" ] && [ "$DOMAIN" != "null" ]; then
+                      mkdir -p "$BASE/data/sites/$DOMAIN"
+                      rsync -av --delete "$dir" "$BASE/data/sites/$DOMAIN/"
+                   fi
+                done
+                rm -rf $BASE/temp_uploads
+             fi
+
+  # ==========================================
+  # 5. CONFIGURE PROXY
+  # ==========================================
+  configure-proxy:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with: { python-version: '3.9' }
+      - run: pip install requests
+      - env:
+          NPM_USER: ${{ secrets.NPM_USER }}
+          NPM_PASS: ${{ secrets.NPM_PASS }}
+        run: python .github/scripts/configure_npm.py 2>&1 | tee npm_log.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: log-npm, path: npm_log.txt }
+
+  # ==========================================
+  # 6. NOTIFICATIONS (Telegram + Dual Email)
+  # ==========================================
+  notify:
+    needs: [deploy, configure-proxy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: log-*, path: logs, merge-multiple: true }
+        continue-on-error: true
+      
+      - name: Prepare Message
+        id: msg
+        env:
+          DEPLOY_STATUS: ${{ needs.deploy.result }}
+          PROXY_STATUS: ${{ needs.configure-proxy.result }}
+        run: |
+          if [ "$DEPLOY_STATUS" == "success" ] && [ "$PROXY_STATUS" == "success" ]; then
+             echo "EMOJI=✅" >> $GITHUB_ENV
+             echo "TITLE=Pipeline Success" >> $GITHUB_ENV
+             echo "STATUS=success" >> $GITHUB_ENV
+          else
+             echo "EMOJI=❌" >> $GITHUB_ENV
+             echo "TITLE=Pipeline Failed" >> $GITHUB_ENV
+             echo "STATUS=failure" >> $GITHUB_ENV
+          fi
+          
+          MESSAGE="<b>Updates:</b>"
+          cat logs/log-container-*.txt logs/log-static-*.txt > apps.txt 2>/dev/null || true
+          while IFS= read -r line; do MESSAGE+="%0A• $line"; done < apps.txt
+          
+          if [ -f "logs/npm_log.txt" ]; then
+             MESSAGE+="%0A%0A<b>🌐 Proxy:</b>"
+             grep -E "❌|⚠️|✅" logs/npm_log.txt | while read -r line; do MESSAGE+="%0A$line"; done
+          fi
+          
+          echo "TELEGRAM_MSG=$MESSAGE" >> $GITHUB_ENV
+          # Strip HTML for email body
+          echo "EMAIL_BODY=$(echo $MESSAGE | sed 's/%0A/\n/g' | sed 's/<b>//g' | sed 's/<\/b>//g')" >> $GITHUB_ENV
+
+      # A. TELEGRAM (Sends to ID 8301392987 from Secret)
+      - name: Telegram
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+            -d chat_id="$CHAT_ID" -d parse_mode="HTML" -d text="$EMOJI <b>$TITLE</b>%0A%0A$TELEGRAM_MSG"
+
+      # B. EMAIL (Sends to both addresses)
+      - name: Send Email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.EMAIL_USER }}
+          password: ${{ secrets.EMAIL_PASS }}
+          subject: ${{ env.EMOJI }} ${{ env.TITLE }} - ${{ github.repository }}
+          # 📧 DUAL RECIPIENTS
+          to: ecappmakersonline@gmail.com,raajbala1999@gmail.com
+          from: ${{ secrets.EMAIL_USER }}
+          body: |
+            Build Status: ${{ env.STATUS }}
+            
+            ${{ env.EMAIL_BODY }}
+            
+            View Logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

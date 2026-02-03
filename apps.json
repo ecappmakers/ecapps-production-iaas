@@ -1,36 +1,40 @@
 {
-  "java": [
-  ],
-  "php": [
-  ],
-  "node": [
+  "apps": [
     {
-      "name": "ecapps.in",
+      "name": "ecapps-main",
+      "type": "static",
+      "domain": "ecapps.in",
       "repo_url": "https://github.com/ecappmakers/ecapps.git",
       "branch": "main",
       "build_cmd": "npm install && npm run build --configuration production",
-      "output_dir": "dist/ecapps-single/browser" 
+      "output_dir": "dist/ecapps-single/browser"
     },
     {
-      "name": "friendselectricals.store",
+      "name": "friends-electricals",
+      "type": "static",
+      "domain": "friendselectricals.store",
       "repo_url": "https://github.com/ecappmakers/friends-electricals-home.git",
       "branch": "master",
       "build_cmd": "npm install && npm run build --configuration production",
-      "output_dir": "dist/friends-electricals-modern/browser" 
+      "output_dir": "dist/friends-electricals-modern/browser"
     },
     {
-      "name": "devsuite.ecapps.in",
+      "name": "devsuite",
+      "type": "static",
+      "domain": "devsuite.ecapps.in",
       "repo_url": "https://github.com/ecappmakers/DevSuite.git",
       "branch": "master",
       "build_cmd": "npm install && npm run build",
-      "output_dir": "build" 
+      "output_dir": "build"
     },
     {
-      "name": "madhumanish.studio",
+      "name": "madhumanish-studio",
+      "type": "static",
+      "domain": "madhumanish.studio",
       "repo_url": "https://github.com/MathumithaArumugam/madhumanishstudio.git",
       "branch": "master",
       "build_cmd": "npm install && npm run build",
-      "output_dir": "dist"       
+      "output_dir": "dist"
     }
   ]
 }
