@@ -5,7 +5,7 @@
       "type": "static",
       "repo_url": "ecappmakers/ecapps",
       "branch": "main",
-      "build_cmd": "npm install && npm run build --configuration production",
+      "build_cmd": "npm install && npm run build",
       "output_dir": "dist/ecapps-single/browser",
       "domain": "ecapps.in"
     },
@@ -14,7 +14,7 @@
       "type": "static",
       "repo_url": "ecappmakers/friends-electricals-home",
       "branch": "master",
-      "build_cmd": "npm install && npm run build --configuration production",
+      "build_cmd": "npm install && npm run build",
       "output_dir": "dist/friends-electricals-modern/browser",
       "domain": "friendselectricals.store"
     },
