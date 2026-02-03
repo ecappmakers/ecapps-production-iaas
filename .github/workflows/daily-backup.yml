@@ -1,0 +1,80 @@
+name: 🗄️ Daily Backup to GDrive
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs at Midnight UTC
+  workflow_dispatch: # Allows manual trigger button
+
+jobs:
+  backup-upload:
+    name: 💾 Backup -> Google Drive
+    runs-on: ubuntu-latest
+    steps:
+      # 1. SSH into VPS and create the MySQL Dump
+      - name: Create Backup on VPS
+        uses: appleboy/ssh-action@master
+        env:
+          DB_PASS: ${{ secrets.DB_ROOT_PASSWORD }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: DB_PASS
+          script: |
+            # Setup folders
+            BASE="/opt/ecapps-hosting"
+            BACKUP_DIR="$BASE/backups"
+            mkdir -p $BACKUP_DIR
+            
+            # Filename with Timestamp
+            DATE=$(date +%Y-%m-%d_%H%M)
+            FILENAME="db_backup_$DATE.sql.gz"
+            
+            # Run Dump if DB exists
+            if docker ps | grep -q main_db; then
+                echo "Creating $FILENAME..."
+                docker exec main_db mysqldump -u root --password=$DB_PASS --all-databases \
+                | gzip > "$BACKUP_DIR/$FILENAME"
+                
+                # VPS Retention: Delete files older than 2 days on the VPS to save space
+                find $BACKUP_DIR -name "*.sql.gz" -mtime +2 -delete
+            else
+                echo "❌ Error: DB container not running"
+                exit 1
+            fi
+
+      # 2. Download the backup from VPS to GitHub Runner
+      - name: Download Backup to Runner
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          # Download everything in the backups folder
+          source: "/opt/ecapps-hosting/backups/*.sql.gz"
+          target: "temp_backups"
+
+      # 3. Upload to Google Drive using Rclone
+      - name: Push to Google Drive
+        uses: rclone/rclone-action@v1
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        with:
+          # Copy files from local runner to 'gdrive:/VPS_Backups'
+          args: copy temp_backups/opt/ecapps-hosting/backups gdrive:/VPS_Backups/MySQL
+
+      # 4. Notify Telegram (Success/Fail)
+      - name: Notify Telegram
+        if: always()
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATUS: ${{ job.status }}
+        run: |
+          if [ "$STATUS" == "success" ]; then
+             MSG="✅ <b>Database Backup Successful</b>%0Auploaded to Google Drive."
+          else
+             MSG="❌ <b>Backup Failed</b>%0ACheck GitHub Actions logs."
+          fi
+          curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+            -d chat_id="$CHAT_ID" -d parse_mode="HTML" -d text="$MSG"
