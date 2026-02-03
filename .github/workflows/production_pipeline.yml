@@ -21,10 +21,9 @@ jobs:
       - id: set-matrix
         run: |
           # 1. Generate Container Matrix
+          # If jq returns empty (no containers), we explicitly set a valid empty JSON object
           CONTAINERS=$(jq -c '{include: [.apps[] | select(.type=="container")]}' apps.json)
-          
-          # Fallback if empty
-          if [ -z "$CONTAINERS" ] || [ "$CONTAINERS" == "null" ]; then
+          if [ "$(echo "$CONTAINERS" | jq '.include | length')" -eq "0" ]; then
              CONTAINERS='{"include":[]}'
           fi
           echo "containers=$CONTAINERS" >> $GITHUB_OUTPUT
@@ -32,9 +31,7 @@ jobs:
 
           # 2. Generate Static Matrix
           STATICS=$(jq -c '{include: [.apps[] | select(.type=="static")]}' apps.json)
-          
-          # Fallback if empty
-          if [ -z "$STATICS" ] || [ "$STATICS" == "null" ]; then
+          if [ "$(echo "$STATICS" | jq '.include | length')" -eq "0" ]; then
              STATICS='{"include":[]}'
           fi
           echo "statics=$STATICS" >> $GITHUB_OUTPUT
@@ -46,7 +43,8 @@ jobs:
   build-containers:
     needs: plan
     runs-on: ubuntu-latest
-    if: fromJson(needs.plan.outputs.containers).include[0]
+    # Safe check: only run if the 'include' array has items
+    if: ${{ fromJson(needs.plan.outputs.containers).include[0] }}
     
     strategy:
       matrix: ${{ fromJson(needs.plan.outputs.containers) }}
@@ -83,7 +81,7 @@ jobs:
   build-static:
     needs: plan
     runs-on: ubuntu-latest
-    if: fromJson(needs.plan.outputs.statics).include[0]
+    if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
     
     strategy:
       matrix: ${{ fromJson(needs.plan.outputs.statics) }}
@@ -129,7 +127,6 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       
-      # A. Update Base Infra
       - name: Update Base Infra
         uses: appleboy/scp-action@master
         with:
@@ -149,7 +146,6 @@ jobs:
             cd /opt/ecapps-hosting
             docker compose -f docker-compose.yml up -d --remove-orphans
 
-      # B. Update Apps & DB
       - name: Update Apps & DB
         uses: appleboy/ssh-action@master
         env:
@@ -162,9 +158,8 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: GH_USER,GH_TOKEN,DB_PASS
           script: |
-            # 1. AUTO-INSTALL JQ (Self-Healing Fix)
+            # Self-Healing: Install jq if missing
             if ! command -v jq &> /dev/null; then
-                echo "⚠️ jq not found. Installing..."
                 export DEBIAN_FRONTEND=noninteractive
                 apt-get update && apt-get install -y jq
             fi
@@ -175,7 +170,6 @@ jobs:
 
             echo $GH_TOKEN | docker login ghcr.io -u $GH_USER --password-stdin
 
-            # Generate Dynamic Compose File
             cat > docker-compose.prod.yml <<EOF
             version: '3.8'
             networks: { hosting_net: { external: true } }
@@ -195,38 +189,41 @@ jobs:
                 networks: [ hosting_net ]
             EOF
 
-            # Append Containers using jq
-            for row in $(jq -r '.apps[] | select(.type=="container") | @base64' apps.json); do
-              _jq() { echo $row | base64 --decode | jq -r "$1"; }
-              NAME=$(_jq '.name')
-              IMAGE="ghcr.io/${GH_USER,,}/$NAME:latest"
+            # ⚠️ FIXED: Check if any containers exist BEFORE looping
+            CONTAINER_COUNT=$(jq '[.apps[] | select(.type=="container")] | length' apps.json)
 
-              echo "  $NAME:" >> docker-compose.prod.yml
-              echo "    image: $IMAGE" >> docker-compose.prod.yml
-              echo "    container_name: $NAME" >> docker-compose.prod.yml
-              echo "    restart: always" >> docker-compose.prod.yml
-              echo "    networks: [hosting_net]" >> docker-compose.prod.yml
-              echo "    environment:" >> docker-compose.prod.yml
-              
-              echo $row | base64 --decode | jq -r '.env | to_entries | .[] | .key + "=" + .value' | while read line; do
-                KEY=$(echo $line | cut -d= -f1)
-                VAL=$(echo $line | cut -d= -f2)
-                [ "$VAL" = "DB_ROOT_PASSWORD" ] && VAL="$DB_PASS"
-                echo "      - $KEY=$VAL" >> docker-compose.prod.yml
-              done
-            done
+            if [ "$CONTAINER_COUNT" -gt "0" ]; then
+                for row in $(jq -r '.apps[] | select(.type=="container") | @base64' apps.json); do
+                  _jq() { echo $row | base64 --decode | jq -r "$1"; }
+                  NAME=$(_jq '.name')
+                  IMAGE="ghcr.io/${GH_USER,,}/$NAME:latest"
+
+                  echo "  $NAME:" >> docker-compose.prod.yml
+                  echo "    image: $IMAGE" >> docker-compose.prod.yml
+                  echo "    container_name: $NAME" >> docker-compose.prod.yml
+                  echo "    restart: always" >> docker-compose.prod.yml
+                  echo "    networks: [hosting_net]" >> docker-compose.prod.yml
+                  echo "    environment:" >> docker-compose.prod.yml
+                  
+                  echo $row | base64 --decode | jq -r '.env | to_entries | .[] | .key + "=" + .value' | while read line; do
+                    KEY=$(echo $line | cut -d= -f1)
+                    VAL=$(echo $line | cut -d= -f2)
+                    [ "$VAL" = "DB_ROOT_PASSWORD" ] && VAL="$DB_PASS"
+                    echo "      - $KEY=$VAL" >> docker-compose.prod.yml
+                  done
+                done
+            fi
 
             docker compose -f docker-compose.prod.yml pull
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
 
-      # C. Sync Static Files
       - uses: actions/download-artifact@v4
-        if: fromJson(needs.plan.outputs.statics).include[0]
+        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
         with: { pattern: static-site-*, path: temp_static, merge-multiple: false }
 
       - uses: appleboy/scp-action@master
-        if: fromJson(needs.plan.outputs.statics).include[0]
+        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -235,7 +232,7 @@ jobs:
           target: /opt/ecapps-hosting/temp_uploads
 
       - name: Finalize Static
-        if: fromJson(needs.plan.outputs.statics).include[0]
+        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -243,16 +240,21 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             BASE="/opt/ecapps-hosting"
-            for dir in $BASE/temp_uploads/temp_static/*/; do
-              [ -d "$dir" ] || continue
-              SITE_NAME=$(basename "$dir" | sed 's/static-site-//')
-              DOMAIN=$(jq -r ".apps[] | select(.name==\"$SITE_NAME\") | .domain" $BASE/apps.json)
-              if [ "$DOMAIN" != "null" ]; then
-                mkdir -p "$BASE/data/sites/$DOMAIN"
-                rsync -av --delete "$dir" "$BASE/data/sites/$DOMAIN/"
-              fi
-            done
-            rm -rf $BASE/temp_uploads
+            # Ensure folder exists
+            mkdir -p $BASE/temp_uploads
+            
+            if [ -d "$BASE/temp_uploads/temp_static" ]; then
+                for dir in $BASE/temp_uploads/temp_static/*/; do
+                   [ -d "$dir" ] || continue
+                   SITE_NAME=$(basename "$dir" | sed 's/static-site-//')
+                   DOMAIN=$(jq -r ".apps[] | select(.name==\"$SITE_NAME\") | .domain" $BASE/apps.json)
+                   if [ "$DOMAIN" != "null" ]; then
+                      mkdir -p "$BASE/data/sites/$DOMAIN"
+                      rsync -av --delete "$dir" "$BASE/data/sites/$DOMAIN/"
+                   fi
+                done
+                rm -rf $BASE/temp_uploads
+            fi
 
   # ======================================================
   # 5. CONFIGURE PROXY
