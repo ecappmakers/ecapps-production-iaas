@@ -1,40 +1,45 @@
 {
-  "apps": [
+  "projects": [
     {
-      "name": "ecapps-main",
-      "type": "static",
-      "domain": "ecapps.in",
-      "repo_url": "https://github.com/ecappmakers/ecapps.git",
+      "name": "ecapps.in",
+      "type": "node",
+      "repo": "ecappmakers/ecapps",
       "branch": "main",
       "build_cmd": "npm install && npm run build --configuration production",
       "output_dir": "dist/ecapps-single/browser"
     },
     {
-      "name": "friends-electricals",
-      "type": "static",
-      "domain": "friendselectricals.store",
-      "repo_url": "https://github.com/ecappmakers/friends-electricals-home.git",
+      "name": "friendselectricals.store",
+      "type": "node",
+      "repo": "ecappmakers/friends-electricals-home",
       "branch": "master",
       "build_cmd": "npm install && npm run build --configuration production",
       "output_dir": "dist/friends-electricals-modern/browser"
     },
     {
-      "name": "devsuite",
-      "type": "static",
-      "domain": "devsuite.ecapps.in",
-      "repo_url": "https://github.com/ecappmakers/DevSuite.git",
+      "name": "devsuite.ecapps.in",
+      "type": "node",
+      "repo": "ecappmakers/DevSuite",
       "branch": "master",
       "build_cmd": "npm install && npm run build",
       "output_dir": "build"
     },
     {
-      "name": "madhumanish-studio",
-      "type": "static",
-      "domain": "madhumanish.studio",
-      "repo_url": "https://github.com/MathumithaArumugam/madhumanishstudio.git",
+      "name": "madhumanish.studio",
+      "type": "node",
+      "repo": "MathumithaArumugam/madhumanishstudio",
       "branch": "master",
       "build_cmd": "npm install && npm run build",
       "output_dir": "dist"
+    },
+    {
+      "name": "database-schema",
+      "type": "database",
+      "repo": "ecappmakers/database-schema",
+      "branch": "main",
+      "build_cmd": null,
+      "output_dir": "./",
+      "target_file": "schema.sql"
     }
   ]
 }
