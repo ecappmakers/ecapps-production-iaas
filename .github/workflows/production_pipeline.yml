@@ -8,7 +8,7 @@ on:
 
 jobs:
   # ======================================================
-  # 1. PLAN (Robust Version)
+  # 1. PLAN (Fail-Safe JSON Generation)
   # ======================================================
   plan:
     runs-on: ubuntu-latest
@@ -18,40 +18,27 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Debug & Validate JSON
-        run: |
-          ls -la
-          if [ ! -f apps.json ]; then
-            echo "❌ Error: apps.json not found in root!"
-            exit 1
-          fi
-          # Check if valid JSON
-          if ! jq . apps.json > /dev/null; then
-             echo "❌ Error: apps.json contains invalid JSON syntax!"
-             exit 1
-          fi
-
       - id: set-matrix
         run: |
           # 1. Generate Container Matrix
-          # We use single quotes for the jq filter to avoid escaping issues
           CONTAINERS=$(jq -c '{include: [.apps[] | select(.type=="container")]}' apps.json)
           
-          # Fallback: If jq returns empty or null, set a valid empty matrix
+          # Fallback if empty
           if [ -z "$CONTAINERS" ] || [ "$CONTAINERS" == "null" ]; then
              CONTAINERS='{"include":[]}'
           fi
           echo "containers=$CONTAINERS" >> $GITHUB_OUTPUT
-          echo "✅ Containers identified: $CONTAINERS"
+          echo "✅ Containers: $CONTAINERS"
 
           # 2. Generate Static Matrix
           STATICS=$(jq -c '{include: [.apps[] | select(.type=="static")]}' apps.json)
           
+          # Fallback if empty
           if [ -z "$STATICS" ] || [ "$STATICS" == "null" ]; then
              STATICS='{"include":[]}'
           fi
           echo "statics=$STATICS" >> $GITHUB_OUTPUT
-          echo "✅ Static Sites identified: $STATICS"
+          echo "✅ Statics: $STATICS"
 
   # ======================================================
   # 2. BUILD CONTAINERS
@@ -59,8 +46,7 @@ jobs:
   build-containers:
     needs: plan
     runs-on: ubuntu-latest
-    # Safe check: Only run if the 'include' array is not empty
-    if: ${{ fromJson(needs.plan.outputs.containers).include[0] }}
+    if: fromJson(needs.plan.outputs.containers).include[0]
     
     strategy:
       matrix: ${{ fromJson(needs.plan.outputs.containers) }}
@@ -97,7 +83,7 @@ jobs:
   build-static:
     needs: plan
     runs-on: ubuntu-latest
-    if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
+    if: fromJson(needs.plan.outputs.statics).include[0]
     
     strategy:
       matrix: ${{ fromJson(needs.plan.outputs.statics) }}
@@ -115,14 +101,11 @@ jobs:
           mkdir -p output
           cd source_code
           ${{ matrix.build_cmd }}
-
           if [ -d "${{ matrix.output_dir }}" ]; then
-            cp -r ${{ matrix.output_dir }}/* ../output/
+             cp -r ${{ matrix.output_dir }}/* ../output/
           else
-            echo "❌ Output dir ${{ matrix.output_dir }} missing!"
-            exit 1
+             echo "❌ Output dir ${{ matrix.output_dir }} missing!"; exit 1
           fi
-
           echo "${{ matrix.name }} (Static)" >> ../built_static.txt
 
       - uses: actions/upload-artifact@v4
@@ -136,7 +119,7 @@ jobs:
           path: built_static.txt
 
   # ======================================================
-  # 4. DEPLOY
+  # 4. DEPLOY TO VPS
   # ======================================================
   deploy:
     needs: [build-containers, build-static]
@@ -145,7 +128,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
-
+      
+      # A. Update Base Infra
       - name: Update Base Infra
         uses: appleboy/scp-action@master
         with:
@@ -165,6 +149,7 @@ jobs:
             cd /opt/ecapps-hosting
             docker compose -f docker-compose.yml up -d --remove-orphans
 
+      # B. Update Apps & DB
       - name: Update Apps & DB
         uses: appleboy/ssh-action@master
         env:
@@ -177,39 +162,40 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: GH_USER,GH_TOKEN,DB_PASS
           script: |
+            # 1. AUTO-INSTALL JQ (Self-Healing Fix)
+            if ! command -v jq &> /dev/null; then
+                echo "⚠️ jq not found. Installing..."
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update && apt-get install -y jq
+            fi
+
             BASE="/opt/ecapps-hosting"
             mkdir -p $BASE/data/sites $BASE/data/mysql $BASE/data/init_sql
             cd $BASE
 
             echo $GH_TOKEN | docker login ghcr.io -u $GH_USER --password-stdin
 
+            # Generate Dynamic Compose File
             cat > docker-compose.prod.yml <<EOF
             version: '3.8'
-            networks:
-              hosting_net:
-                external: true
+            networks: { hosting_net: { external: true } }
             services:
               db:
                 image: mariadb:10.11
                 container_name: main_db
                 restart: always
-                environment:
-                  MYSQL_ROOT_PASSWORD: $DB_PASS
-                volumes:
-                  - "./data/mysql:/var/lib/mysql"
-                  - "./data/init_sql:/docker-entrypoint-initdb.d"
-                networks: [hosting_net]
-
+                environment: { MYSQL_ROOT_PASSWORD: $DB_PASS }
+                volumes: [ "./data/mysql:/var/lib/mysql", "./data/init_sql:/docker-entrypoint-initdb.d" ]
+                networks: [ hosting_net ]
               shared_web:
                 image: php:8.1-apache
                 container_name: shared_web
                 restart: always
-                volumes:
-                  - "./data/sites:/var/www/html"
-                networks: [hosting_net]
+                volumes: [ "./data/sites:/var/www/html" ]
+                networks: [ hosting_net ]
             EOF
 
-            # SAFE JSON PARSING
+            # Append Containers using jq
             for row in $(jq -r '.apps[] | select(.type=="container") | @base64' apps.json); do
               _jq() { echo $row | base64 --decode | jq -r "$1"; }
               NAME=$(_jq '.name')
@@ -221,7 +207,7 @@ jobs:
               echo "    restart: always" >> docker-compose.prod.yml
               echo "    networks: [hosting_net]" >> docker-compose.prod.yml
               echo "    environment:" >> docker-compose.prod.yml
-
+              
               echo $row | base64 --decode | jq -r '.env | to_entries | .[] | .key + "=" + .value' | while read line; do
                 KEY=$(echo $line | cut -d= -f1)
                 VAL=$(echo $line | cut -d= -f2)
@@ -234,15 +220,13 @@ jobs:
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
 
+      # C. Sync Static Files
       - uses: actions/download-artifact@v4
-        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
-        with:
-          pattern: static-site-*
-          path: temp_static
-          merge-multiple: false
+        if: fromJson(needs.plan.outputs.statics).include[0]
+        with: { pattern: static-site-*, path: temp_static, merge-multiple: false }
 
       - uses: appleboy/scp-action@master
-        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
+        if: fromJson(needs.plan.outputs.statics).include[0]
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -251,7 +235,7 @@ jobs:
           target: /opt/ecapps-hosting/temp_uploads
 
       - name: Finalize Static
-        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
+        if: fromJson(needs.plan.outputs.statics).include[0]
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -259,11 +243,10 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             BASE="/opt/ecapps-hosting"
-
             for dir in $BASE/temp_uploads/temp_static/*/; do
+              [ -d "$dir" ] || continue
               SITE_NAME=$(basename "$dir" | sed 's/static-site-//')
               DOMAIN=$(jq -r ".apps[] | select(.name==\"$SITE_NAME\") | .domain" $BASE/apps.json)
-
               if [ "$DOMAIN" != "null" ]; then
                 mkdir -p "$BASE/data/sites/$DOMAIN"
                 rsync -av --delete "$dir" "$BASE/data/sites/$DOMAIN/"
@@ -279,23 +262,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-
+        with: { python-version: '3.9' }
       - run: pip install requests
-
       - env:
           NPM_USER: ${{ secrets.NPM_USER }}
           NPM_PASS: ${{ secrets.NPM_PASS }}
         run: python .github/scripts/configure_npm.py 2>&1 | tee npm_log.txt
-
       - uses: actions/upload-artifact@v4
         if: always()
-        with:
-          name: log-npm
-          path: npm_log.txt
+        with: { name: log-npm, path: npm_log.txt }
 
   # ======================================================
   # 6. NOTIFICATIONS
@@ -307,11 +283,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         continue-on-error: true
-        with:
-          pattern: log-*
-          path: logs
-          merge-multiple: true
-
+        with: { pattern: log-*, path: logs, merge-multiple: true }
+      
       - name: Prepare Message
         id: msg
         env:
@@ -327,16 +300,16 @@ jobs:
              echo "TITLE=Pipeline Failed" >> $GITHUB_ENV
              echo "STATUS=failure" >> $GITHUB_ENV
           fi
-
+          
           MESSAGE="<b>Updates:</b>"
           cat logs/log-container-*.txt logs/log-static-*.txt > apps.txt 2>/dev/null || true
           while IFS= read -r line; do MESSAGE+="%0A• $line"; done < apps.txt
-
+          
           if [ -f "logs/npm_log.txt" ]; then
              MESSAGE+="%0A%0A<b>🌐 Proxy:</b>"
              grep -E "❌|⚠️|✅" logs/npm_log.txt | while read -r line; do MESSAGE+="%0A$line"; done
           fi
-
+          
           echo "TELEGRAM_MSG=$MESSAGE" >> $GITHUB_ENV
           echo "EMAIL_BODY=$(echo $MESSAGE | sed 's/%0A/\n/g' | sed 's/<b>//g' | sed 's/<\/b>//g')" >> $GITHUB_ENV
 
@@ -361,7 +334,7 @@ jobs:
           from: ${{ secrets.EMAIL_USER }}
           body: |
             Build Status: ${{ env.STATUS }}
-
+            
             ${{ env.EMAIL_BODY }}
-
+            
             View Logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
