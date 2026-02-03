@@ -59,7 +59,6 @@ jobs:
   build-containers:
     needs: plan
     runs-on: ubuntu-latest
-    # FIX: Only run if the flag is true. This prevents "empty matrix" errors.
     if: needs.plan.outputs.has_containers == 'true'
     
     strategy:
@@ -88,7 +87,6 @@ jobs:
         with:
           context: .
           push: true
-          # FIX: Use lowercased owner name
           tags: ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.name }}:latest
 
       - run: echo "${{ matrix.name }} (Container)" >> built_apps.txt
@@ -148,7 +146,6 @@ jobs:
   deploy:
     needs: [plan, build-containers, build-static]
     runs-on: ubuntu-latest
-    # Run if previous jobs succeeded OR were skipped (but not failed)
     if: |
       always() && 
       !contains(needs.build-containers.result, 'failure') && 
@@ -174,7 +171,6 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             cd /opt/ecapps-hosting
-            # Force update base infra
             docker compose -f docker-compose.yml up -d --remove-orphans
 
       - name: Update Apps & DB
@@ -189,7 +185,6 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: GH_USER,GH_TOKEN,DB_PASS
           script: |
-            # FIX: Use sudo if not root, or check for existence silently
             if ! command -v jq &> /dev/null; then
                 if [ "$EUID" -ne 0 ]; then
                   echo "⚠️ jq missing and not root - cannot install automatically."
@@ -232,7 +227,7 @@ jobs:
                 for row in $(jq -r '.apps[] | select(.type=="container") | @base64' apps.json); do
                   _jq() { echo $row | base64 --decode | jq -r "$1"; }
                   NAME=$(_jq '.name')
-                  # FIX: Lowercase user in image path
+                  # Lowercase user in image path
                   IMAGE="ghcr.io/$LOWER_USER/$NAME:latest"
 
                   echo "  $NAME:" >> docker-compose.prod.yml
@@ -287,7 +282,6 @@ jobs:
                    
                    if [ "$DOMAIN" != "null" ] && [ ! -z "$DOMAIN" ]; then
                       mkdir -p "$BASE/data/sites/$DOMAIN"
-                      # Using rsync with delete to ensure clean deployments
                       rsync -av --delete "$dir" "$BASE/data/sites/$DOMAIN/"
                    fi
                 done
@@ -332,7 +326,6 @@ jobs:
           DEPLOY_STATUS: ${{ needs.deploy.result }}
           PROXY_STATUS: ${{ needs.configure-proxy.result }}
         run: |
-          # Robust check for skip/success
           if [ "$DEPLOY_STATUS" == "success" ] && ( [ "$PROXY_STATUS" == "success" ] || [ "$PROXY_STATUS" == "skipped" ] ); then
              echo "EMOJI=✅" >> $GITHUB_ENV
              echo "TITLE=Pipeline Success" >> $GITHUB_ENV
@@ -344,7 +337,6 @@ jobs:
           fi
           
           MESSAGE="<b>Updates:</b>"
-          # Handle case where no logs exist (e.g., nothing built)
           touch apps.txt
           cat logs/log-container-*.txt logs/log-static-*.txt >> apps.txt 2>/dev/null || true
           
@@ -360,16 +352,15 @@ jobs:
           fi
           
           echo "TELEGRAM_MSG=$MESSAGE" >> $GITHUB_ENV
-          # Clean HTML tags for email body
           CLEAN_BODY=$(echo "$MESSAGE" | sed 's/%0A/\n/g' | sed 's/<b>//g' | sed 's/<\/b>//g')
           
-          # Multiline string for GITHUB_ENV
           echo "EMAIL_BODY<<EOF" >> $GITHUB_ENV
           echo "$CLEAN_BODY" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
       - name: Telegram
-        if: secrets.TELEGRAM_TOKEN != ''
+        # FIX: Wrapped secrets in ${{ }} to satisfy parser
+        if: ${{ secrets.TELEGRAM_TOKEN != '' }}
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -378,7 +369,8 @@ jobs:
             -d chat_id="$CHAT_ID" -d parse_mode="HTML" -d text="$EMOJI <b>$TITLE</b>%0A%0A$TELEGRAM_MSG"
 
       - name: Send Email
-        if: secrets.EMAIL_USER != ''
+        # FIX: Wrapped secrets in ${{ }} to satisfy parser
+        if: ${{ secrets.EMAIL_USER != '' }}
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
