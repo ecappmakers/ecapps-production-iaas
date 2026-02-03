@@ -17,9 +17,10 @@ jobs:
       statics: ${{ steps.set-matrix.outputs.statics }}
     steps:
       - uses: actions/checkout@v3
+
       - id: set-matrix
         run: |
-          # FIX: Escaped inner quotes \"container\" so the shell command is valid
+          # FIX: Escaping internal quotes for valid JSON generation
           echo "containers=$(jq -c '{include: [.apps[] | select(.type==\"container\")]}' apps.json)" >> $GITHUB_OUTPUT
           echo "statics=$(jq -c '{include: [.apps[] | select(.type==\"static\")]}' apps.json)" >> $GITHUB_OUTPUT
 
@@ -29,30 +30,38 @@ jobs:
   build-containers:
     needs: plan
     runs-on: ubuntu-latest
-    # FIX: Wrapped in single quotes to satisfy YAML parser
-    if: '${{ fromJson(needs.plan.outputs.containers).include[0] }}'
+    # FIX: Removed quotes and ${{}} for native expression evaluation
+    if: fromJson(needs.plan.outputs.containers).include[0]
+
     strategy:
-      # FIX: Wrapped in single quotes to satisfy YAML parser
-      matrix: '${{ fromJson(needs.plan.outputs.containers) }}'
+      # FIX: Removed quotes so it parses as an Object, not a String
+      matrix: ${{ fromJson(needs.plan.outputs.containers) }}
+
     steps:
       - uses: actions/checkout@v3
         with:
           repository: ${{ matrix.repo_url }}
           ref: ${{ matrix.branch }}
           token: ${{ secrets.GH_PAT }}
+
       - uses: docker/login-action@v2
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - uses: docker/build-push-action@v4
         with:
           context: .
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}:latest
+
       - run: echo "${{ matrix.name }} (Container)" >> built_apps.txt
+
       - uses: actions/upload-artifact@v4
-        with: { name: log-container-${{ matrix.name }}, path: built_apps.txt }
+        with:
+          name: log-container-${{ matrix.name }}
+          path: built_apps.txt
 
   # ======================================================
   # 3. BUILD STATIC SITES (Angular/React/HTML)
@@ -60,11 +69,13 @@ jobs:
   build-static:
     needs: plan
     runs-on: ubuntu-latest
-    # FIX: Wrapped in single quotes
-    if: '${{ fromJson(needs.plan.outputs.statics).include[0] }}'
+    # FIX: Removed quotes
+    if: fromJson(needs.plan.outputs.statics).include[0]
+
     strategy:
-      # FIX: Wrapped in single quotes
-      matrix: '${{ fromJson(needs.plan.outputs.statics) }}'
+      # FIX: Removed quotes
+      matrix: ${{ fromJson(needs.plan.outputs.statics) }}
+
     steps:
       - uses: actions/checkout@v3
         with:
@@ -72,21 +83,31 @@ jobs:
           ref: ${{ matrix.branch }}
           token: ${{ secrets.GH_PAT }}
           path: source_code
+
       - name: Build
         run: |
           mkdir -p output
           cd source_code
           ${{ matrix.build_cmd }}
+
           if [ -d "${{ matrix.output_dir }}" ]; then
-             cp -r ${{ matrix.output_dir }}/* ../output/
+            cp -r ${{ matrix.output_dir }}/* ../output/
           else
-             echo "❌ Output dir ${{ matrix.output_dir }} missing!"; exit 1
+            echo "❌ Output dir ${{ matrix.output_dir }} missing!"
+            exit 1
           fi
+
           echo "${{ matrix.name }} (Static)" >> ../built_static.txt
+
       - uses: actions/upload-artifact@v4
-        with: { name: static-site-${{ matrix.name }}, path: output }
+        with:
+          name: static-site-${{ matrix.name }}
+          path: output
+
       - uses: actions/upload-artifact@v4
-        with: { name: log-static-${{ matrix.name }}, path: built_static.txt }
+        with:
+          name: log-static-${{ matrix.name }}
+          path: built_static.txt
 
   # ======================================================
   # 4. DEPLOY TO VPS
@@ -95,9 +116,10 @@ jobs:
     needs: [build-containers, build-static]
     runs-on: ubuntu-latest
     if: always()
+
     steps:
       - uses: actions/checkout@v3
-      
+
       # A. Update Base Infrastructure
       - name: Update Base Infra
         uses: appleboy/scp-action@master
@@ -105,8 +127,8 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: "docker-compose.yml"
-          target: "/opt/ecapps-hosting/"
+          source: docker-compose.yml
+          target: /opt/ecapps-hosting/
 
       - name: Apply Base Infra
         uses: appleboy/ssh-action@master
@@ -115,8 +137,8 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-             cd /opt/ecapps-hosting
-             docker compose -f docker-compose.yml up -d --remove-orphans
+            cd /opt/ecapps-hosting
+            docker compose -f docker-compose.yml up -d --remove-orphans
 
       # B. Update Apps & Database
       - name: Update Apps & DB
@@ -131,96 +153,100 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: GH_USER,GH_TOKEN,DB_PASS
           script: |
-             BASE="/opt/ecapps-hosting"
-             mkdir -p $BASE/data/sites $BASE/data/mysql $BASE/data/init_sql
-             cd $BASE
-             echo $GH_TOKEN | docker login ghcr.io -u $GH_USER --password-stdin
-             
-             # Generate Dynamic Compose File
-             cat > docker-compose.prod.yml <<EOF
-             version: '3.8'
-             networks: { hosting_net: { external: true } }
-             services:
-               db:
-                 image: mariadb:10.11
-                 container_name: main_db
-                 restart: always
-                 environment: { MYSQL_ROOT_PASSWORD: $DB_PASS }
-                 volumes: [ "./data/mysql:/var/lib/mysql", "./data/init_sql:/docker-entrypoint-initdb.d" ]
-                 networks: [ hosting_net ]
-               shared_web:
-                 image: php:8.1-apache
-                 container_name: shared_web
-                 restart: always
-                 volumes: [ "./data/sites:/var/www/html" ]
-                 networks: [ hosting_net ]
-             EOF
-             
-             # Append App Containers
-             cat <<JSON > apps.json
-             $(cat apps.json)
-             JSON
-             
-             for row in $(jq -r '.apps[] | select(.type=="container") | @base64' apps.json); do
-                 _jq() { echo ${row} | base64 --decode | jq -r "${1}"; }
-                 NAME=$(_jq '.name'); IMAGE="ghcr.io/${GH_USER,,}/$NAME:latest"
-                 
-                 echo "  $NAME:" >> docker-compose.prod.yml
-                 echo "    image: $IMAGE" >> docker-compose.prod.yml
-                 echo "    container_name: $NAME" >> docker-compose.prod.yml
-                 echo "    networks: [hosting_net]" >> docker-compose.prod.yml
-                 echo "    restart: always" >> docker-compose.prod.yml
-                 echo "    environment:" >> docker-compose.prod.yml
-                 
-                 echo ${row} | base64 --decode | jq -r '.env | to_entries | .[] | .key + "=" + .value' | while read line; do
-                    KEY=$(echo $line | cut -d'=' -f1); VAL=$(echo $line | cut -d'=' -f2)
-                    if [ "$VAL" == "DB_ROOT_PASSWORD" ]; then VAL="$DB_PASS"; fi
-                    echo "      - $KEY=$VAL" >> docker-compose.prod.yml
-                 done
-             done
-             
-             docker compose -f docker-compose.prod.yml pull
-             docker compose -f docker-compose.prod.yml up -d --remove-orphans
-             docker image prune -f
+            BASE="/opt/ecapps-hosting"
+            mkdir -p $BASE/data/sites $BASE/data/mysql $BASE/data/init_sql
+            cd $BASE
+
+            echo $GH_TOKEN | docker login ghcr.io -u $GH_USER --password-stdin
+
+            cat > docker-compose.prod.yml <<EOF
+            version: '3.8'
+            networks:
+              hosting_net:
+                external: true
+            services:
+              db:
+                image: mariadb:10.11
+                container_name: main_db
+                restart: always
+                environment:
+                  MYSQL_ROOT_PASSWORD: $DB_PASS
+                volumes:
+                  - "./data/mysql:/var/lib/mysql"
+                  - "./data/init_sql:/docker-entrypoint-initdb.d"
+                networks: [hosting_net]
+
+              shared_web:
+                image: php:8.1-apache
+                container_name: shared_web
+                restart: always
+                volumes:
+                  - "./data/sites:/var/www/html"
+                networks: [hosting_net]
+            EOF
+
+            for row in $(jq -r '.apps[] | select(.type=="container") | @base64' apps.json); do
+              _jq() { echo $row | base64 --decode | jq -r "$1"; }
+              NAME=$(_jq '.name')
+              IMAGE="ghcr.io/${GH_USER,,}/$NAME:latest"
+
+              echo "  $NAME:" >> docker-compose.prod.yml
+              echo "    image: $IMAGE" >> docker-compose.prod.yml
+              echo "    container_name: $NAME" >> docker-compose.prod.yml
+              echo "    restart: always" >> docker-compose.prod.yml
+              echo "    networks: [hosting_net]" >> docker-compose.prod.yml
+              echo "    environment:" >> docker-compose.prod.yml
+
+              echo $row | base64 --decode | jq -r '.env | to_entries | .[] | .key + "=" + .value' | while read line; do
+                KEY=$(echo $line | cut -d= -f1)
+                VAL=$(echo $line | cut -d= -f2)
+                [ "$VAL" = "DB_ROOT_PASSWORD" ] && VAL="$DB_PASS"
+                echo "      - $KEY=$VAL" >> docker-compose.prod.yml
+              done
+            done
+
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+            docker image prune -f
 
       # C. Sync Static Files
       - uses: actions/download-artifact@v4
-        # FIX: Wrapped in single quotes
-        if: '${{ fromJson(needs.plan.outputs.statics).include[0] }}'
-        with: { pattern: static-site-*, path: temp_static, merge-multiple: false }
+        if: fromJson(needs.plan.outputs.statics).include[0]
+        with:
+          pattern: static-site-*
+          path: temp_static
+          merge-multiple: false
 
       - uses: appleboy/scp-action@master
-        # FIX: Wrapped in single quotes
-        if: '${{ fromJson(needs.plan.outputs.statics).include[0] }}'
+        if: fromJson(needs.plan.outputs.statics).include[0]
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: "temp_static/*"
-          target: "/opt/ecapps-hosting/temp_uploads"
+          source: temp_static/*
+          target: /opt/ecapps-hosting/temp_uploads
 
       - name: Finalize Static
-        # FIX: Wrapped in single quotes
-        if: '${{ fromJson(needs.plan.outputs.statics).include[0] }}'
+        if: fromJson(needs.plan.outputs.statics).include[0]
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-             BASE="/opt/ecapps-hosting"
-             if [ -d "$BASE/temp_uploads/temp_static" ]; then
-                for dir in $BASE/temp_uploads/temp_static/*/; do
-                   [ -d "$dir" ] || continue
-                   SITE_NAME=$(basename "$dir" | sed 's/static-site-//')
-                   DOMAIN=$(jq -r ".apps[] | select(.name==\"$SITE_NAME\") | .domain" $BASE/apps.json)
-                   if [ ! -z "$DOMAIN" ] && [ "$DOMAIN" != "null" ]; then
-                      mkdir -p "$BASE/data/sites/$DOMAIN"
-                      rsync -av --delete "$dir" "$BASE/data/sites/$DOMAIN/"
-                   fi
-                done
-                rm -rf $BASE/temp_uploads
-             fi
+            BASE="/opt/ecapps-hosting"
+
+            for dir in $BASE/temp_uploads/temp_static/*/; do
+              SITE_NAME=$(basename "$dir" | sed 's/static-site-//')
+              DOMAIN=$(jq -r ".apps[] | select(.name==\"$SITE_NAME\") | .domain" $BASE/apps.json)
+
+              if [ "$DOMAIN" != "null" ]; then
+                mkdir -p "$BASE/data/sites/$DOMAIN"
+                rsync -av --delete "$dir" "$BASE/data/sites/$DOMAIN/"
+              fi
+            done
+
+            rm -rf $BASE/temp_uploads
 
   # ======================================================
   # 5. CONFIGURE PROXY
@@ -230,19 +256,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - uses: actions/setup-python@v4
-        with: { python-version: '3.9' }
+        with:
+          python-version: '3.9'
+
       - run: pip install requests
+
       - env:
           NPM_USER: ${{ secrets.NPM_USER }}
           NPM_PASS: ${{ secrets.NPM_PASS }}
         run: python .github/scripts/configure_npm.py 2>&1 | tee npm_log.txt
+
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: log-npm, path: npm_log.txt }
+        with:
+          name: log-npm
+          path: npm_log.txt
 
   # ======================================================
-  # 6. NOTIFICATIONS
+  # 6. NOTIFICATIONS (RESTORED & FIXED)
   # ======================================================
   notify:
     needs: [deploy, configure-proxy]
@@ -250,9 +283,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
-        with: { pattern: log-*, path: logs, merge-multiple: true }
         continue-on-error: true
-      
+        with:
+          pattern: log-*
+          path: logs
+          merge-multiple: true
+
       - name: Prepare Message
         id: msg
         env:
@@ -268,16 +304,16 @@ jobs:
              echo "TITLE=Pipeline Failed" >> $GITHUB_ENV
              echo "STATUS=failure" >> $GITHUB_ENV
           fi
-          
+
           MESSAGE="<b>Updates:</b>"
           cat logs/log-container-*.txt logs/log-static-*.txt > apps.txt 2>/dev/null || true
           while IFS= read -r line; do MESSAGE+="%0A• $line"; done < apps.txt
-          
+
           if [ -f "logs/npm_log.txt" ]; then
              MESSAGE+="%0A%0A<b>🌐 Proxy:</b>"
              grep -E "❌|⚠️|✅" logs/npm_log.txt | while read -r line; do MESSAGE+="%0A$line"; done
           fi
-          
+
           echo "TELEGRAM_MSG=$MESSAGE" >> $GITHUB_ENV
           echo "EMAIL_BODY=$(echo $MESSAGE | sed 's/%0A/\n/g' | sed 's/<b>//g' | sed 's/<\/b>//g')" >> $GITHUB_ENV
 
@@ -302,7 +338,7 @@ jobs:
           from: ${{ secrets.EMAIL_USER }}
           body: |
             Build Status: ${{ env.STATUS }}
-            
+
             ${{ env.EMAIL_BODY }}
-            
+
             View Logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
