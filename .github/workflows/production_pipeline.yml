@@ -6,6 +6,10 @@ on:
     branches: [ "production" ]
     paths: [ "apps.json", "docker-compose.yml" ]
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   # ======================================================
   # 1. PLAN (Fail-Safe JSON Generation)
@@ -13,29 +17,41 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
-      containers: ${{ steps.set-matrix.outputs.containers }}
-      statics: ${{ steps.set-matrix.outputs.statics }}
+      matrix_containers: ${{ steps.set-matrix.outputs.containers }}
+      has_containers: ${{ steps.set-matrix.outputs.has_containers }}
+      matrix_statics: ${{ steps.set-matrix.outputs.statics }}
+      has_statics: ${{ steps.set-matrix.outputs.has_statics }}
     steps:
       - uses: actions/checkout@v3
 
       - id: set-matrix
+        name: Generate Matrices
         run: |
           # 1. Generate Container Matrix
-          # If jq returns empty (no containers), we explicitly set a valid empty JSON object
           CONTAINERS=$(jq -c '{include: [.apps[] | select(.type=="container")]}' apps.json)
-          if [ "$(echo "$CONTAINERS" | jq '.include | length')" -eq "0" ]; then
-             CONTAINERS='{"include":[]}'
-          fi
+          COUNT_C=$(echo "$CONTAINERS" | jq '.include | length')
+          
           echo "containers=$CONTAINERS" >> $GITHUB_OUTPUT
-          echo "✅ Containers: $CONTAINERS"
+          if [ "$COUNT_C" -gt "0" ]; then
+            echo "has_containers=true" >> $GITHUB_OUTPUT
+            echo "✅ Containers found: $COUNT_C"
+          else
+            echo "has_containers=false" >> $GITHUB_OUTPUT
+            echo "⚠️ No containers found."
+          fi
 
           # 2. Generate Static Matrix
           STATICS=$(jq -c '{include: [.apps[] | select(.type=="static")]}' apps.json)
-          if [ "$(echo "$STATICS" | jq '.include | length')" -eq "0" ]; then
-             STATICS='{"include":[]}'
-          fi
+          COUNT_S=$(echo "$STATICS" | jq '.include | length')
+
           echo "statics=$STATICS" >> $GITHUB_OUTPUT
-          echo "✅ Statics: $STATICS"
+          if [ "$COUNT_S" -gt "0" ]; then
+            echo "has_statics=true" >> $GITHUB_OUTPUT
+            echo "✅ Static sites found: $COUNT_S"
+          else
+            echo "has_statics=false" >> $GITHUB_OUTPUT
+            echo "⚠️ No static sites found."
+          fi
 
   # ======================================================
   # 2. BUILD CONTAINERS
@@ -43,11 +59,12 @@ jobs:
   build-containers:
     needs: plan
     runs-on: ubuntu-latest
-    # Safe check: only run if the 'include' array has items
-    if: ${{ fromJson(needs.plan.outputs.containers).include[0] }}
+    # FIX: Only run if the flag is true. This prevents "empty matrix" errors.
+    if: needs.plan.outputs.has_containers == 'true'
     
     strategy:
-      matrix: ${{ fromJson(needs.plan.outputs.containers) }}
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix_containers) }}
 
     steps:
       - uses: actions/checkout@v3
@@ -55,6 +72,11 @@ jobs:
           repository: ${{ matrix.repo_url }}
           ref: ${{ matrix.branch }}
           token: ${{ secrets.GH_PAT }}
+
+      - name: Lowercase Repo Owner
+        id: meta
+        run: |
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_OUTPUT
 
       - uses: docker/login-action@v2
         with:
@@ -66,7 +88,8 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}:latest
+          # FIX: Use lowercased owner name
+          tags: ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.name }}:latest
 
       - run: echo "${{ matrix.name }} (Container)" >> built_apps.txt
 
@@ -81,10 +104,11 @@ jobs:
   build-static:
     needs: plan
     runs-on: ubuntu-latest
-    if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
+    if: needs.plan.outputs.has_statics == 'true'
     
     strategy:
-      matrix: ${{ fromJson(needs.plan.outputs.statics) }}
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix_statics) }}
 
     steps:
       - uses: actions/checkout@v3
@@ -99,10 +123,12 @@ jobs:
           mkdir -p output
           cd source_code
           ${{ matrix.build_cmd }}
+          
           if [ -d "${{ matrix.output_dir }}" ]; then
-             cp -r ${{ matrix.output_dir }}/* ../output/
+              cp -r ${{ matrix.output_dir }}/* ../output/
           else
-             echo "❌ Output dir ${{ matrix.output_dir }} missing!"; exit 1
+              echo "❌ Output dir ${{ matrix.output_dir }} missing!"
+              exit 1
           fi
           echo "${{ matrix.name }} (Static)" >> ../built_static.txt
 
@@ -120,9 +146,13 @@ jobs:
   # 4. DEPLOY TO VPS
   # ======================================================
   deploy:
-    needs: [build-containers, build-static]
+    needs: [plan, build-containers, build-static]
     runs-on: ubuntu-latest
-    if: always()
+    # Run if previous jobs succeeded OR were skipped (but not failed)
+    if: |
+      always() && 
+      !contains(needs.build-containers.result, 'failure') && 
+      !contains(needs.build-static.result, 'failure')
 
     steps:
       - uses: actions/checkout@v3
@@ -144,6 +174,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             cd /opt/ecapps-hosting
+            # Force update base infra
             docker compose -f docker-compose.yml up -d --remove-orphans
 
       - name: Update Apps & DB
@@ -158,17 +189,23 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: GH_USER,GH_TOKEN,DB_PASS
           script: |
-            # Self-Healing: Install jq if missing
+            # FIX: Use sudo if not root, or check for existence silently
             if ! command -v jq &> /dev/null; then
-                export DEBIAN_FRONTEND=noninteractive
-                apt-get update && apt-get install -y jq
+                if [ "$EUID" -ne 0 ]; then
+                  echo "⚠️ jq missing and not root - cannot install automatically."
+                else
+                  export DEBIAN_FRONTEND=noninteractive
+                  apt-get update && apt-get install -y jq
+                fi
             fi
 
             BASE="/opt/ecapps-hosting"
             mkdir -p $BASE/data/sites $BASE/data/mysql $BASE/data/init_sql
             cd $BASE
-
-            echo $GH_TOKEN | docker login ghcr.io -u $GH_USER --password-stdin
+            
+            # Lowercase user for docker login
+            LOWER_USER=$(echo "$GH_USER" | tr '[:upper:]' '[:lower:]')
+            echo $GH_TOKEN | docker login ghcr.io -u $LOWER_USER --password-stdin
 
             cat > docker-compose.prod.yml <<EOF
             version: '3.8'
@@ -189,14 +226,14 @@ jobs:
                 networks: [ hosting_net ]
             EOF
 
-            # ⚠️ FIXED: Check if any containers exist BEFORE looping
             CONTAINER_COUNT=$(jq '[.apps[] | select(.type=="container")] | length' apps.json)
 
             if [ "$CONTAINER_COUNT" -gt "0" ]; then
                 for row in $(jq -r '.apps[] | select(.type=="container") | @base64' apps.json); do
                   _jq() { echo $row | base64 --decode | jq -r "$1"; }
                   NAME=$(_jq '.name')
-                  IMAGE="ghcr.io/${GH_USER,,}/$NAME:latest"
+                  # FIX: Lowercase user in image path
+                  IMAGE="ghcr.io/$LOWER_USER/$NAME:latest"
 
                   echo "  $NAME:" >> docker-compose.prod.yml
                   echo "    image: $IMAGE" >> docker-compose.prod.yml
@@ -219,11 +256,11 @@ jobs:
             docker image prune -f
 
       - uses: actions/download-artifact@v4
-        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
+        if: needs.plan.outputs.has_statics == 'true'
         with: { pattern: static-site-*, path: temp_static, merge-multiple: false }
 
       - uses: appleboy/scp-action@master
-        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
+        if: needs.plan.outputs.has_statics == 'true'
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -232,7 +269,7 @@ jobs:
           target: /opt/ecapps-hosting/temp_uploads
 
       - name: Finalize Static
-        if: ${{ fromJson(needs.plan.outputs.statics).include[0] }}
+        if: needs.plan.outputs.has_statics == 'true'
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -240,7 +277,6 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             BASE="/opt/ecapps-hosting"
-            # Ensure folder exists
             mkdir -p $BASE/temp_uploads
             
             if [ -d "$BASE/temp_uploads/temp_static" ]; then
@@ -248,8 +284,10 @@ jobs:
                    [ -d "$dir" ] || continue
                    SITE_NAME=$(basename "$dir" | sed 's/static-site-//')
                    DOMAIN=$(jq -r ".apps[] | select(.name==\"$SITE_NAME\") | .domain" $BASE/apps.json)
-                   if [ "$DOMAIN" != "null" ]; then
+                   
+                   if [ "$DOMAIN" != "null" ] && [ ! -z "$DOMAIN" ]; then
                       mkdir -p "$BASE/data/sites/$DOMAIN"
+                      # Using rsync with delete to ensure clean deployments
                       rsync -av --delete "$dir" "$BASE/data/sites/$DOMAIN/"
                    fi
                 done
@@ -262,6 +300,7 @@ jobs:
   configure-proxy:
     needs: deploy
     runs-on: ubuntu-latest
+    if: needs.deploy.result == 'success'
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
@@ -293,7 +332,8 @@ jobs:
           DEPLOY_STATUS: ${{ needs.deploy.result }}
           PROXY_STATUS: ${{ needs.configure-proxy.result }}
         run: |
-          if [ "$DEPLOY_STATUS" == "success" ] && [ "$PROXY_STATUS" == "success" ]; then
+          # Robust check for skip/success
+          if [ "$DEPLOY_STATUS" == "success" ] && ( [ "$PROXY_STATUS" == "success" ] || [ "$PROXY_STATUS" == "skipped" ] ); then
              echo "EMOJI=✅" >> $GITHUB_ENV
              echo "TITLE=Pipeline Success" >> $GITHUB_ENV
              echo "STATUS=success" >> $GITHUB_ENV
@@ -304,18 +344,32 @@ jobs:
           fi
           
           MESSAGE="<b>Updates:</b>"
-          cat logs/log-container-*.txt logs/log-static-*.txt > apps.txt 2>/dev/null || true
-          while IFS= read -r line; do MESSAGE+="%0A• $line"; done < apps.txt
+          # Handle case where no logs exist (e.g., nothing built)
+          touch apps.txt
+          cat logs/log-container-*.txt logs/log-static-*.txt >> apps.txt 2>/dev/null || true
+          
+          if [ ! -s apps.txt ]; then
+             MESSAGE+="%0A• No changes detected or all builds skipped."
+          else
+             while IFS= read -r line; do MESSAGE+="%0A• $line"; done < apps.txt
+          fi
           
           if [ -f "logs/npm_log.txt" ]; then
              MESSAGE+="%0A%0A<b>🌐 Proxy:</b>"
-             grep -E "❌|⚠️|✅" logs/npm_log.txt | while read -r line; do MESSAGE+="%0A$line"; done
+             grep -E "❌|⚠️|✅" logs/npm_log.txt | while read -r line; do MESSAGE+="%0A$line"; done || true
           fi
           
           echo "TELEGRAM_MSG=$MESSAGE" >> $GITHUB_ENV
-          echo "EMAIL_BODY=$(echo $MESSAGE | sed 's/%0A/\n/g' | sed 's/<b>//g' | sed 's/<\/b>//g')" >> $GITHUB_ENV
+          # Clean HTML tags for email body
+          CLEAN_BODY=$(echo "$MESSAGE" | sed 's/%0A/\n/g' | sed 's/<b>//g' | sed 's/<\/b>//g')
+          
+          # Multiline string for GITHUB_ENV
+          echo "EMAIL_BODY<<EOF" >> $GITHUB_ENV
+          echo "$CLEAN_BODY" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
       - name: Telegram
+        if: secrets.TELEGRAM_TOKEN != ''
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -324,6 +378,7 @@ jobs:
             -d chat_id="$CHAT_ID" -d parse_mode="HTML" -d text="$EMOJI <b>$TITLE</b>%0A%0A$TELEGRAM_MSG"
 
       - name: Send Email
+        if: secrets.EMAIL_USER != ''
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
