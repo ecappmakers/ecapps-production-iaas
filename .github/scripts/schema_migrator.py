@@ -307,10 +307,7 @@ class SchemaMigrator:
 
     def generate_drop_foreign_key(self, table_name, constraint_name):
         """Generate ALTER TABLE DROP FOREIGN KEY"""
-        return f"ALTER TABLE `{table_name}` DROP FOREIGN KEY `{constraint_name}`
-        index_type = index.get('type', 'NORMAL')
-        
-        return f"CREATE INDEX `{index_name}` ON `{table_name}` ({columns});"
+        return f"ALTER TABLE `{table_name}` DROP FOREIGN KEY `{constraint_name}`;"
 
     def compare_and_generate_migrations(self, schemas):
         """Compare JSON schemas with database and generate migrations"""
@@ -523,11 +520,7 @@ class SchemaMigrator:
         except IOError as e:
             print(f"⚠️ Could not save migration history: {e}")
 
-    def run(self, sche
-
-    def migrate(self, schema_dir, dry_run=False):
-        """Alias for run() method - called by pipeline"""
-        return self.run(schema_dir, dry_run=dry_run, save_history=True)ma_dir, dry_run=False, save_history=False):
+    def run(self, schema_dir, dry_run=False, save_history=False):
         """Run the complete migration process"""
         if not self.connect():
             return False
@@ -546,6 +539,10 @@ class SchemaMigrator:
         success = self.apply_migrations(migrations, dry_run=dry_run)
         self.disconnect()
         return success
+
+    def migrate(self, schema_dir, dry_run=False):
+        """Alias for run() method - called by pipeline"""
+        return self.run(schema_dir, dry_run=dry_run, save_history=True)
 
 
 def main():
