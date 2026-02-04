@@ -70,7 +70,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.plan.outputs.matrix_containers) }}
+      matrix: ${{ fromJson(needs.plan.outputs.matrix_containers || '{"include":[]}') }}
 
     steps:
       - name: 📥 Checkout Source
@@ -120,7 +120,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.plan.outputs.matrix_statics) }}
+      matrix: ${{ fromJson(needs.plan.outputs.matrix_statics || '{"include":[]}') }}
 
     steps:
       - name: 📥 Checkout Source
@@ -212,19 +212,19 @@ jobs:
             for row in $(jq -r '.apps[] | select(.type | ascii_downcase | test("static|node")) | @base64' apps.json); do
               _jq() { echo "$row" | base64 --decode | jq -r "$1"; }
               DOMAIN=$(_jq '.domain')
-              [ "$DOMAIN" != "null" ] && [ -n "$DOMAIN" ] && cat >> "$VHOST_FILE" <<EOF
+              [ "$DOMAIN" != "null" ] && [ -n "$DOMAIN" ] && cat <<EOVHOST >> "$VHOST_FILE"
 <VirtualHost *:80>
-  ServerName $DOMAIN
-  ServerAlias www.$DOMAIN
-  DocumentRoot /var/www/html/$DOMAIN
-  <Directory /var/www/html/$DOMAIN>
+  ServerName ${DOMAIN}
+  ServerAlias www.${DOMAIN}
+  DocumentRoot /var/www/html/${DOMAIN}
+  <Directory /var/www/html/${DOMAIN}>
     AllowOverride All
     Require all granted
     FallbackResource /index.html
   </Directory>
 </VirtualHost>
 
-EOF
+EOVHOST
             done
 
             echo "🐳 Generating docker-compose overlay" | tee -a build.log
