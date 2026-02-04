@@ -37,13 +37,10 @@
       "domain": "madhumanish.studio"
     },
     {
-      "name": "database-schema",
+      "name": "aladeeswaran_schema",
       "type": "database",
-      "repo_url": "ecappmakers/database-schema",
-      "branch": "master",
-      "build_cmd": null,
-      "output_dir": "./",
-      "target_file": "schema.sql"
+      "repo_url": "ecappmakers/aladeeswaran_schema",
+      "branch": "main"
     }
   ]
 }
