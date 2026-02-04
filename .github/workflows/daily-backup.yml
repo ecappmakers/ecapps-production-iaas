@@ -1,4 +1,4 @@
-name: 🗄️ Daily Backup
+name: 🗄️ Daily Backup (Enhanced)
 
 on:
   schedule:
@@ -7,47 +7,99 @@ on:
 
 jobs:
   backup:
+    name: 🛡️ Secure Database Backup
     runs-on: ubuntu-latest
+    
     steps:
-      - name: SSH Dump
+      # 1. SSH into VPS and create the dump
+      - name: 📦 SSH Database Dump
         uses: appleboy/ssh-action@master
-        env: { DB_PASS: "${{ secrets.DB_ROOT_PASSWORD }}" }
+        env:
+          DB_PASS: ${{ secrets.DB_ROOT_PASSWORD }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: DB_PASS
+          script_stop: true # Stop script on first error
           script: |
-             DIR="/opt/ecapps-hosting/backups"
-             mkdir -p $DIR
-             FILE="db_$(date +%F).sql.gz"
-             # Supports MariaDB (main_db)
-             if docker ps | grep -q main_db; then
-                docker exec main_db mysqldump -u root -p$DB_PASS --all-databases | gzip > "$DIR/$FILE"
-                find $DIR -name "*.sql.gz" -mtime +2 -delete
-             else
-                exit 1
-             fi
+            # Enable strict error handling
+            set -euo pipefail
 
-      - name: Download to Runner
+            echo "🔵 Starting Database Backup..."
+            
+            BACKUP_DIR="/opt/ecapps-hosting/backups"
+            DATE_STAMP=$(date +%F)
+            FILE_NAME="db_${DATE_STAMP}.sql.gz"
+            FILE_PATH="${BACKUP_DIR}/${FILE_NAME}"
+
+            # Ensure directory exists
+            mkdir -p "$BACKUP_DIR"
+
+            # Check if container exists
+            if ! docker ps | grep -q main_db; then
+              echo "❌ Error: Docker container 'main_db' is not running."
+              exit 1
+            fi
+
+            # Perform Dump
+            echo "⏳ Dumping database..."
+            docker exec main_db mysqldump -u root -p"$DB_PASS" --all-databases | gzip > "$FILE_PATH"
+
+            # Verify file creation and size
+            if [ -f "$FILE_PATH" ] && [ -s "$FILE_PATH" ]; then
+               echo "✅ Backup created successfully: $FILE_NAME"
+               ls -lh "$FILE_PATH"
+            else
+               echo "❌ Error: Backup file is empty or was not created."
+               exit 1
+            fi
+
+            # Clean up old backups (older than 2 days)
+            echo "🧹 Cleaning up old files..."
+            find "$BACKUP_DIR" -name "*.sql.gz" -mtime +2 -delete
+            echo "✅ Cleanup complete."
+
+      # 2. Download the backup file to the GitHub Runner
+      - name: ⬇️ Download to Runner
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
+          set -euo pipefail
+          
+          echo "🔵 Configuring SSH..."
           mkdir -p ~/.ssh temp_backups
-          echo "$VPS_SSH_KEY" > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H $VPS_HOST >> ~/.ssh/known_hosts
-          # Downloads the backup so we can attach it
-          scp -i ~/.ssh/id_rsa $VPS_USER@$VPS_HOST:/opt/ecapps-hosting/backups/*.sql.gz temp_backups/
+          echo "$VPS_SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
 
-      - name: Upload to GDrive
+          echo "⏳ Downloading files from VPS..."
+          scp -i ~/.ssh/id_rsa "$VPS_USER@$VPS_HOST:/opt/ecapps-hosting/backups/*.sql.gz" temp_backups/
+
+          # Verify download
+          echo "🔍 Verifying download..."
+          if [ -z "$(ls -A temp_backups)" ]; then
+             echo "❌ Error: 'temp_backups' directory is empty. Download failed."
+             exit 1
+          else
+             echo "✅ Files downloaded successfully:"
+             ls -R temp_backups/
+          fi
+
+      # 3. Upload to Google Drive (Verbose mode enabled for debugging)
+      - name: ☁️ Upload to Google Drive
         uses: wei/rclone@v1
-        env: { RCLONE_CONF: "${{ secrets.RCLONE_CONFIG }}" }
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
         with:
-          args: copy temp_backups gdrive:/VPS_Backups/MySQL
+          # Using -v (verbose) to see config errors if any
+          args: copy temp_backups gdrive:/VPS_Backups/MySQL -v
 
-      - name: Email & Notify
+      # 4. Email Notification (Formatted HTML)
+      - name: 📧 Email Notification
+        if: always()
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -55,23 +107,55 @@ jobs:
           secure: true
           username: ${{ secrets.EMAIL_USER }}
           password: ${{ secrets.EMAIL_PASS }}
-          subject: 💾 DB Backup - ${{ github.repository }}
-          # 📧 DUAL RECIPIENTS
+          subject: "💾 Backup Report: ${{ job.status }} - ${{ github.repository }}"
           to: ecappmakersonline@gmail.com,raajbala1999@gmail.com
-          from: ${{ secrets.EMAIL_USER }}
-          body: "Backup uploaded to Google Drive: VPS_Backups/MySQL"
-          # 📎 ATTACHMENT
+          from: "GitHub Actions <${{ secrets.EMAIL_USER }}>"
+          html_body: |
+            <h3>Backup Status Report</h3>
+            <p><strong>Repository:</strong> ${{ github.repository }}</p>
+            <p><strong>Status:</strong> ${{ job.status }}</p>
+            <p><strong>Date:</strong> ${{ steps.date.outputs.date }}</p>
+            <hr>
+            <p>The automated database backup workflow has completed.</p>
+            <ul>
+              <li><strong>Source:</strong> VPS (Docker/MariaDB)</li>
+              <li><strong>Destination:</strong> Google Drive/VPS_Backups/MySQL</li>
+            </ul>
+            <br>
+            <p><em>This is an automated message from GitHub Actions.</em></p>
           attachments: temp_backups/*.sql.gz
 
-      - name: Telegram
+      # 5. Telegram Notification (Elegant Layout)
+      - name: 📱 Telegram Notification
         if: always()
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           STATUS: ${{ job.status }}
-          # ⚠️ REPLACE WITH YOUR REAL DRIVE FOLDER LINK
-          LINK: "https://drive.google.com/drive/folders/1uqzVpVozguaysN5nl0Dg2FdYVoqQisbe"
+          GDRIVE_LINK: "https://drive.google.com/drive/folders/1uqzVpVozguaysN5nl0Dg2FdYVoqQisbe"
         run: |
-          [ "$STATUS" == "success" ] && M="✅ Backup Sent" || M="❌ Backup Failed"
+          # Define Status Icon and Message
+          if [ "$STATUS" == "success" ]; then
+            ICON="✅"
+            HEADER="Backup Successful"
+            MSG="The database has been securely backed up and uploaded to Google Drive."
+          else
+            ICON="❌"
+            HEADER="Backup Failed"
+            MSG="An error occurred during the backup process. Please check GitHub Actions logs."
+          fi
+
+          # Construct HTML Message
+          TEXT="<b>$ICON $HEADER</b>%0A"
+          TEXT="${TEXT}──────────────────%0A"
+          TEXT="${TEXT}<b>📂 Repo:</b> ${{ github.repository }}%0A"
+          TEXT="${TEXT}<b>📅 Time:</b> $(date '+%Y-%m-%d %H:%M:%S UTC')%0A"
+          TEXT="${TEXT}──────────────────%0A"
+          TEXT="${TEXT}$MSG%0A%0A"
+          TEXT="${TEXT}<a href='$GDRIVE_LINK'>📂 Open Google Drive Folder</a>"
+
+          # Send Request
           curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-            -d chat_id="$CHAT_ID" -d parse_mode="HTML" -d text="$M%0A<a href='$LINK'>Open Drive</a>"
+            -d chat_id="$CHAT_ID" \
+            -d parse_mode="HTML" \
+            -d text="$TEXT"
