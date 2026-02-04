@@ -99,7 +99,9 @@ jobs:
         run: echo "🐳 ${{ matrix.name }} (Container)" | tee -a built_apps.txt
 
       - uses: actions/upload-artifact@v4
-        with: { name: log-container-${{ matrix.name }}, path: built_apps.txt }
+        with:
+          name: log-container-${{ matrix.name }}
+          path: built_apps.txt
 
   # ======================================================
   # 3. BUILD STATIC SITES
@@ -142,9 +144,14 @@ jobs:
           echo "⚡ ${{ matrix.name }} (Static)" >> ../built_static.txt
 
       - uses: actions/upload-artifact@v4
-        with: { name: static-site-${{ matrix.name }}, path: output }
+        with:
+          name: static-site-${{ matrix.name }}
+          path: output
+
       - uses: actions/upload-artifact@v4
-        with: { name: log-static-${{ matrix.name }}, path: built_static.txt }
+        with:
+          name: log-static-${{ matrix.name }}
+          path: built_static.txt
 
   # ======================================================
   # 4. DEPLOY TO VPS
@@ -283,7 +290,8 @@ jobs:
 
       - uses: actions/download-artifact@v4
         if: needs.plan.outputs.has_statics == 'true'
-        with: { pattern: static-site-*, path: temp_static, merge-multiple: false }
+        with:
+          pattern: static-site-*, path: temp_static, merge-multiple: false
       
       - uses: appleboy/scp-action@master
         if: needs.plan.outputs.has_statics == 'true'
@@ -331,7 +339,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
-        with: { python-version: "3.9" }
+        with:
+          python-version: "3.9"
       - run: pip install requests
 
       # ⚠️ Safety: Normalize types for Python script
@@ -345,7 +354,9 @@ jobs:
         run: python .github/scripts/configure_npm.py 2>&1 | tee npm_log.txt
 
       - uses: actions/upload-artifact@v4
-        with: { name: log-npm, path: npm_log.txt }
+        with:
+          name: log-npm
+          path: npm_log.txt
 
   # ======================================================
   # 6. NOTIFICATIONS
@@ -362,7 +373,10 @@ jobs:
       - name: 📥 Download Logs
         uses: actions/download-artifact@v4
         continue-on-error: true
-        with: { pattern: log-*, path: logs, merge-multiple: true }
+        with:
+          pattern: log-*
+          path: logs
+          merge-multiple: true
 
       - name: 🧠 Build Notification Payload
         env:
@@ -428,5 +442,7 @@ jobs:
           from: ${{ secrets.EMAIL_USER }}
           body: |
             Build Status: ${{ env.STATUS }}
+            
             ${{ env.EMAIL_BODY }}
+            
             View Logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
