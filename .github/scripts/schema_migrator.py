@@ -191,7 +191,11 @@ class SchemaMigrator:
                 default_val = col_obj['default']
                 if default_val in ['CURRENT_TIMESTAMP', 'NULL']:
                     col_sql += f" DEFAULT {default_val}"
+                elif isinstance(default_val, str) and (default_val.startswith("'") or default_val.startswith('"')):
+                    # Already quoted, use as-is
+                    col_sql += f" DEFAULT {default_val}"
                 else:
+                    # Not quoted, add quotes
                     col_sql += f" DEFAULT '{default_val}'"
 
             columns_sql.append(col_sql)
@@ -249,7 +253,11 @@ class SchemaMigrator:
             default_val = col_def_obj['default']
             if default_val in ['CURRENT_TIMESTAMP', 'NULL']:
                 col_sql += f" DEFAULT {default_val}"
+            elif isinstance(default_val, str) and (default_val.startswith("'") or default_val.startswith('"')):
+                # Already quoted, use as-is
+                col_sql += f" DEFAULT {default_val}"
             else:
+                # Not quoted, add quotes
                 col_sql += f" DEFAULT '{default_val}'"
 
         return f"ALTER TABLE `{table_name}` ADD COLUMN {col_sql};"
@@ -271,7 +279,11 @@ class SchemaMigrator:
             default_val = col_def_obj['default']
             if default_val in ['CURRENT_TIMESTAMP', 'NULL']:
                 col_sql += f" DEFAULT {default_val}"
+            elif isinstance(default_val, str) and (default_val.startswith("'") or default_val.startswith('"')):
+                # Already quoted, use as-is
+                col_sql += f" DEFAULT {default_val}"
             else:
+                # Not quoted, add quotes
                 col_sql += f" DEFAULT '{default_val}'"
 
         return f"ALTER TABLE `{table_name}` MODIFY COLUMN {col_sql};"
