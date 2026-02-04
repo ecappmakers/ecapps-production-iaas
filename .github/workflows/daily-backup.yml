@@ -11,6 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+      - name: 🛠️ Install Tooling
+        run: |
+          sudo -v ; curl https://rclone.org/install.sh | sudo bash
+          sudo apt-get install -y jq
+
       - name: 📦 SSH Database Dump
         uses: appleboy/ssh-action@master
         env:
@@ -26,7 +31,15 @@ jobs:
             BACKUP_DIR="/tmp/db_staging"
             DATE_STAMP=$(date +%F)
             FILE_PATH="${BACKUP_DIR}/db_${DATE_STAMP}.sql.gz"
+            
             mkdir -p "$BACKUP_DIR"
+            
+            # Perform Dump
+            if ! docker ps | grep -q main_db; then
+              echo "❌ Error: Docker container 'main_db' not running."
+              exit 1
+            fi
+            
             docker exec main_db mysqldump -u root -p"$DB_PASS" --all-databases | gzip > "$FILE_PATH"
 
       - name: ⬇️ Download to Runner
@@ -39,6 +52,7 @@ jobs:
           echo "$VPS_SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+          
           scp -i ~/.ssh/id_rsa "$VPS_USER@$VPS_HOST:/tmp/db_staging/*.sql.gz" temp_backups/
 
       - name: 🗑️ Wipe VPS Local Copy
@@ -47,28 +61,33 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script: rm -rf /tmp/db_staging
+          script: |
+            rm -rf /tmp/db_staging
+            echo "✅ VPS temporary files cleared."
 
       - name: ☁️ Upload to Google Drive
-        uses: wei/rclone@v1
         env:
           RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
-        with:
-          args: copy temp_backups gdrive:/VPS_Backups/MySQL
+        run: |
+          echo "$RCLONE_CONF" > rclone.conf
+          rclone --config rclone.conf copy temp_backups gdrive:/VPS_Backups/MySQL
 
       - name: 📑 Fetch Historical Metadata
         shell: bash
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
         run: |
-          # Fetch JSON metadata for all files in the folder
-          # Note: This requires your rclone config to have sufficient scopes to read URLs
-          RAW_JSON=$(rclone --config <(echo "${{ secrets.RCLONE_CONFIG }}") lsjson gdrive:/VPS_Backups/MySQL --hash)
+          echo "$RCLONE_CONF" > rclone.conf
           
-          # Generate HTML list for Email
+          # Fetch JSON metadata for files in GDrive
+          RAW_JSON=$(rclone --config rclone.conf lsjson gdrive:/VPS_Backups/MySQL)
+          
+          # Generate HTML list for Email (Direct Links included)
           echo "HISTORICAL_HTML<<EOF" >> $GITHUB_ENV
           echo "$RAW_JSON" | jq -r '.[] | "<li><a href=\"https://drive.google.com/open?id=\(.ID)\">\(.Name)</a> - \((.Size/1024/1024) | printf(\"%.2f\")) MB (Uploaded: \(.ModTime | split(\".\")[0]))</li>"' >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-          # Generate Text list for Telegram
+          # Generate Text list for Telegram (Direct Links included)
           echo "HISTORICAL_TEXT<<EOF" >> $GITHUB_ENV
           echo "$RAW_JSON" | jq -r '.[] | "📄 <a href=\"https://drive.google.com/open?id=\(.ID)\">\(.Name)</a>\n📅 \(.ModTime | split(\".\")[0])\n⚖️ \((.Size/1024/1024) | printf(\"%.2f\")) MB\n"' >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
@@ -87,13 +106,13 @@ jobs:
           from: "GitHub Actions <${{ secrets.EMAIL_USER }}>"
           html_body: |
             <h3>Full Backup History (Google Drive)</h3>
-            <p>The latest backup has been uploaded and the VPS staging area has been cleared.</p>
+            <p>The latest backup was successful. Local VPS copies have been deleted.</p>
             <hr>
             <ul>
               ${{ env.HISTORICAL_HTML }}
             </ul>
             <hr>
-            <p><em>Links lead directly to the Google Drive file viewer.</em></p>
+            <p><strong>Job Status:</strong> ${{ job.status }}</p>
           attachments: temp_backups/*.sql.gz
 
       - name: 📱 Telegram Notification
@@ -102,9 +121,18 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
+          HISTORY="${{ env.HISTORICAL_TEXT }}"
+          
           TEXT="<b>📊 Historical Backup Report</b>%0A"
           TEXT="${TEXT}──────────────────%0A"
-          TEXT="${TEXT}$HISTORICAL_TEXT"
+          
+          if [ -z "$HISTORY" ]; then
+            TEXT="${TEXT}<i>No historical files found.</i>%0A"
+          else
+            # Ensure the text is URL encoded for the curl request
+            TEXT="${TEXT}$HISTORY"
+          fi
+          
           TEXT="${TEXT}──────────────────%0A"
           TEXT="${TEXT}✅ <b>Status:</b> ${{ job.status }}"
 
