@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: [ "production" ]
-    paths: [ "apps.json", "docker-compose.yml" ]
+    paths: [ "apps.json", "docker-compose.yml", ".github/workflows/**" ]
 
 permissions:
   contents: read
@@ -27,12 +27,13 @@ jobs:
       - id: set-matrix
         name: Generate Matrices
         run: |
-          echo "📂 Debug: Listing files in root..."
+          echo "📂 Debug: Listing files..."
           ls -la
 
-          # 1. Generate Container Matrix (Case Insensitive)
+          # 1. Generate Container Matrix
           # Accepts type="container" or "backend"
-          CONTAINERS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("container|backend"))]}' apps.json)
+          # Maps 'repo' -> 'repo_url' automatically
+          CONTAINERS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("container|backend")) | . + {repo_url: (.repo_url // .repo)}]}' apps.json)
           COUNT_C=$(echo "$CONTAINERS" | jq '.include | length')
           
           echo "containers=$CONTAINERS" >> $GITHUB_OUTPUT
@@ -44,9 +45,10 @@ jobs:
             echo "⚠️ No containers found."
           fi
 
-          # 2. Generate Static Matrix (Case Insensitive)
-          # Accepts type="static" or "node" (for your Angular/React apps)
-          STATICS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("static|node"))]}' apps.json)
+          # 2. Generate Static Matrix
+          # Accepts type="static" or "node" (Angular/React)
+          # Maps 'repo' -> 'repo_url' automatically
+          STATICS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("static|node")) | . + {repo_url: (.repo_url // .repo)}]}' apps.json)
           COUNT_S=$(echo "$STATICS" | jq '.include | length')
 
           echo "statics=$STATICS" >> $GITHUB_OUTPUT
@@ -146,7 +148,7 @@ jobs:
           path: built_static.txt
 
   # ======================================================
-  # 4. DEPLOY TO VPS
+  # 4. DEPLOY TO VPS (With Dynamic VHost Generation)
   # ======================================================
   deploy:
     needs: [plan, build-containers, build-static]
@@ -159,18 +161,18 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       
-      # 1. Upload Base Infra AND apps.json (CRITICAL FIX)
+      # 1. Upload Base Infra AND apps.json
       - name: Update Base Infra
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          # ⚠️ FIX: Uploading apps.json so the VPS can read it
+          # ⚠️ CRITICAL: Upload apps.json so the server can generate VHOSTS
           source: "docker-compose.yml,apps.json"
           target: /opt/ecapps-hosting/
 
-      # 2. Generate Dynamic Compose & Deploy Both
+      # 2. Generate Configs & Deploy
       - name: Update Apps & DB
         uses: appleboy/ssh-action@master
         env:
@@ -194,31 +196,79 @@ jobs:
             fi
 
             BASE="/opt/ecapps-hosting"
-            mkdir -p $BASE/data/sites $BASE/data/mysql $BASE/data/init_sql
+            mkdir -p $BASE/data/sites $BASE/data/mysql $BASE/data/init_sql $BASE/data/apache
             cd $BASE
 
-            # Verify apps.json exists now
             if [ ! -f "apps.json" ]; then
-               echo "❌ Error: apps.json missing on server! Check SCP step."
+               echo "❌ Error: apps.json missing on server!"
                exit 1
             fi
 
-            # Login to GHCR
+            # ---------------------------------------------------------
+            # 1. GENERATE DYNAMIC VHOSTS.CONF (The Logic you liked)
+            # ---------------------------------------------------------
+            VHOST_FILE="$BASE/data/apache/vhosts.conf"
+            echo "# Auto-generated VHosts by Pipeline - $(date)" > $VHOST_FILE
+
+            # Loop through static/node apps and write VirtualHost blocks
+            for row in $(jq -r '.apps[] | select(.type | ascii_downcase | test("static|node")) | @base64' apps.json); do
+                _jq() { echo $row | base64 --decode | jq -r "$1"; }
+                DOMAIN=$(_jq '.domain')
+                
+                if [ "$DOMAIN" != "null" ] && [ ! -z "$DOMAIN" ]; then
+                    echo "<VirtualHost *:80>" >> $VHOST_FILE
+                    echo "    ServerName $DOMAIN" >> $VHOST_FILE
+                    echo "    ServerAlias www.$DOMAIN" >> $VHOST_FILE
+                    echo "    DocumentRoot /var/www/html/$DOMAIN" >> $VHOST_FILE
+                    echo "    <Directory /var/www/html/$DOMAIN>" >> $VHOST_FILE
+                    echo "        Options Indexes FollowSymLinks" >> $VHOST_FILE
+                    echo "        AllowOverride All" >> $VHOST_FILE
+                    echo "        Require all granted" >> $VHOST_FILE
+                    # This enables SPA routing (React/Angular)
+                    echo "        FallbackResource /index.html" >> $VHOST_FILE
+                    echo "    </Directory>" >> $VHOST_FILE
+                    echo "</VirtualHost>" >> $VHOST_FILE
+                    echo "" >> $VHOST_FILE
+                fi
+            done
+            echo "✅ Generated vhosts.conf with $(grep -c '<VirtualHost' $VHOST_FILE) sites."
+
+            # ---------------------------------------------------------
+            # 2. GENERATE DYNAMIC DOCKER COMPOSE
+            # ---------------------------------------------------------
             LOWER_USER=$(echo "$GH_USER" | tr '[:upper:]' '[:lower:]')
             echo $GH_TOKEN | docker login ghcr.io -u $LOWER_USER --password-stdin
 
-            # ---------------------------------------------------------
-            # GENERATE DYNAMIC COMPOSE FILE
-            # ---------------------------------------------------------
             cat > docker-compose.prod.yml <<EOF
             version: '3.8'
             services:
+              # Shared Web Service with Mounted VHosts
+              shared_web:
+                image: php:8.1-apache
+                container_name: shared_web
+                restart: always
+                volumes: 
+                  - "./data/sites:/var/www/html"
+                  # Mount the generated config file
+                  - "./data/apache/vhosts.conf:/etc/apache2/sites-enabled/000-default.conf"
+                networks: [ hosting_net ]
+                # Ensure headers/rewrite modules are on
+                command: /bin/sh -c "a2enmod headers rewrite && docker-php-entrypoint apache2-foreground"
+
+              # Database
+              db:
+                image: mariadb:10.11
+                container_name: main_db
+                restart: always
+                environment: { MYSQL_ROOT_PASSWORD: $DB_PASS }
+                volumes: [ "./data/mysql:/var/lib/mysql", "./data/init_sql:/docker-entrypoint-initdb.d" ]
+                networks: [ hosting_net ]
             EOF
 
-            CONTAINER_COUNT=$(jq '[.apps[] | select(.type=="container")] | length' apps.json)
-
+            # Add Dynamic Containers
+            CONTAINER_COUNT=$(jq '[.apps[] | select(.type | ascii_downcase | test("container|backend"))] | length' apps.json)
             if [ "$CONTAINER_COUNT" -gt "0" ]; then
-                for row in $(jq -r '.apps[] | select(.type=="container") | @base64' apps.json); do
+                for row in $(jq -r '.apps[] | select(.type | ascii_downcase | test("container|backend")) | @base64' apps.json); do
                   _jq() { echo $row | base64 --decode | jq -r "$1"; }
                   NAME=$(_jq '.name')
                   IMAGE="ghcr.io/$LOWER_USER/$NAME:latest"
@@ -237,13 +287,9 @@ jobs:
                     echo "      - $KEY=$VAL" >> docker-compose.prod.yml
                   done
                 done
-            else
-               echo "  # No dynamic containers" >> docker-compose.prod.yml
             fi
 
-            # ---------------------------------------------------------
-            # DEPLOY BOTH FILES TOGETHER (Overlay Strategy)
-            # ---------------------------------------------------------
+            # Deploy Both Files (Overlay Strategy)
             docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
@@ -285,6 +331,10 @@ jobs:
                    fi
                 done
                 rm -rf $BASE/temp_uploads
+                
+                # Reload Apache to pick up new files & config
+                cd $BASE
+                docker compose -f docker-compose.yml -f docker-compose.prod.yml restart shared_web
             fi
 
   # ======================================================
@@ -314,8 +364,6 @@ jobs:
     needs: [deploy, configure-proxy]
     if: always()
     runs-on: ubuntu-latest
-    
-    # ✅ FIX: Map secrets to env vars at the JOB level.
     env:
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       EMAIL_USER: ${{ secrets.EMAIL_USER }}
