@@ -9,9 +9,9 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- CONFIGURATION ---
-NPM_BASE_URL = os.environ.get("NPM_BASE_URL", "https://localhost:81")
+NPM_BASE_URL = os.environ.get("NPM_BASE_URL", "https://pm.ecapps.in")
 APPS_FILE = os.environ.get("APPS_FILE", "apps.json")
-NPM_TIMEOUT = int(os.environ.get("NPM_TIMEOUT", "90"))
+NPM_TIMEOUT = int(os.environ.get("NPM_TIMEOUT", "120"))
 
 NPM_USER = os.environ.get("NPM_USER")
 NPM_PASS = os.environ.get("NPM_PASS")
@@ -26,12 +26,19 @@ def get_token():
     for attempt in range(max_attempts):
         try:
             url = f"{NPM_BASE_URL}/api/tokens"
-            payload = {"identity": NPM_USER, "secret": NPM_PASS}
+            payload = {
+                "identity": NPM_USER,
+                "secret": NPM_PASS,
+                "expiry": "1y"  # Request 1-year token validity
+            }
             print(f"🔐 Attempt {attempt+1}/{max_attempts}: Connecting to {url}...")
             response = requests.post(url, json=payload, timeout=15, verify=False)
             response.raise_for_status()
-            print(f"✅ Authentication successful")
-            return response.json()['token']
+            token = response.json().get('token')
+            if not token:
+                raise ValueError("No token in response")
+            print(f"✅ Authentication successful (Token expires in 1 year)")
+            return token
         except requests.exceptions.Timeout:
             wait_time = min(2 ** attempt, 10)
             print(f"⏳ Request timeout (attempt {attempt+1}/{max_attempts}), retrying in {wait_time}s...")
@@ -50,7 +57,10 @@ def get_token():
 
 def get_existing_hosts(token):
     """Fetch list of already configured domains with retries"""
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
     max_attempts = 3
     
     for attempt in range(max_attempts):
@@ -79,7 +89,10 @@ def get_existing_hosts(token):
 
 def create_proxy_host(token, app):
     """Create a new Proxy Host with Auto-SSL and retry logic"""
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
     domain = app.get('domain')
     
     # Routing Logic
@@ -119,6 +132,10 @@ def create_proxy_host(token, app):
             if response.status_code == 201:
                 print(f"✅ Created: {domain}")
                 return True
+            elif response.status_code == 401:
+                print(f"❌ Authentication failed (401): Invalid token or credentials")
+                print(f"   Response: {response.text}")
+                return False
             else:
                 print(f"⚠️  Failed {domain} (Status: {response.status_code})")
                 print(f"   Response: {response.text}")

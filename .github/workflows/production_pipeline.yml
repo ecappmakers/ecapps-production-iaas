@@ -588,76 +588,31 @@ jobs:
     if: ${{ always() && !contains(needs.deploy.result, 'failure') }}
     steps:
       - uses: actions/checkout@v3
-      
-      - name: 📤 Upload NPM Config Script
-        uses: appleboy/scp-action@master
+      - uses: actions/setup-python@v4
         with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          source: .github/scripts/configure_npm.py
-          target: /opt/ecapps-hosting/
+          python-version: "3.10"
+      - run: |
+          pip install requests urllib3
 
-      - name: 🌐 Configure NPM on VPS
-        uses: appleboy/ssh-action@master
+      # ⚠️ Safety: Normalize types for Python script
+      - name: Normalize Apps JSON
+        run: |
+          jq '.apps |= map(if .type == "node" then .type = "static" else . end)' apps.json > apps_fixed.json && mv apps_fixed.json apps.json
+
+      - name: 🌐 Configure NPM
+        env:
+          NPM_USER: ${{ secrets.NPM_USER }}
+          NPM_PASS: ${{ secrets.NPM_PASS }}
+          NPM_BASE_URL: "https://pm.ecapps.in"
+          NPM_TIMEOUT: "120"
+          APPS_FILE: "apps.json"
+        run: python .github/scripts/configure_npm.py 2>&1 | tee npm_config.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script: |
-            BASE="/opt/ecapps-hosting"
-            
-            echo "🌐 Configuring Nginx Proxy Manager on VPS..."
-            
-            # Normalize apps.json types (node -> static)
-            jq '.apps |= map(if .type == "node" then .type = "static" else . end)' "$BASE/apps.json" > "$BASE/apps_fixed.json"
-            mv "$BASE/apps_fixed.json" "$BASE/apps.json"
-            
-            # Wait for NPM to be ready before configuration
-            echo "⏳ Waiting for NPM to be ready..."
-            WAIT_TIME=0
-            MAX_WAIT=120
-            NPM_READY=false
-            
-            while [ $WAIT_TIME -lt $MAX_WAIT ]; do
-              # Check if NPM container is running
-              if docker ps | grep -q npm; then
-                # Test API with verbose output
-                HTTP_CODE=$(curl -s -k -w "%{http_code}" -o /tmp/npm_test.json https://localhost:81/api/settings -H "Accept: application/json" 2>/dev/null || echo "000")
-                
-                if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "403" ]; then
-                  echo "✅ NPM API is responsive (HTTP $HTTP_CODE)"
-                  NPM_READY=true
-                  break
-                else
-                  echo "   HTTP $HTTP_CODE - API starting... ($((MAX_WAIT - WAIT_TIME))s remaining)"
-                fi
-              else
-                echo "   Container starting... ($((MAX_WAIT - WAIT_TIME))s remaining)"
-              fi
-              
-              sleep 3
-              WAIT_TIME=$((WAIT_TIME + 3))
-            done
-            
-            if [ "$NPM_READY" != "true" ]; then
-              echo "⚠️  NPM API not fully responsive, but proceeding (this is OK)..."
-            fi
-            
-            # Extra sleep to ensure full readiness
-            sleep 5
-            
-            # Run NPM configuration script (Python already installed)
-            export NPM_BASE_URL="https://localhost:81"
-            export NPM_USER="${{ secrets.NPM_USER }}"
-            export NPM_PASS="${{ secrets.NPM_PASS }}"
-            export NPM_TIMEOUT="120"
-            export APPS_FILE="$BASE/apps.json"
-            
-            python3 "$BASE/.github/scripts/configure_npm.py" 2>&1 | tee "$BASE/npm_config.log"
-            
-            # Upload log as artifact would be done differently, just save locally
-            echo "📋 Configuration complete. Log saved to npm_config.log"
+          name: log-npm
+          path: npm_config.log
 
   # ======================================================
   # 6. NOTIFICATIONS
@@ -671,18 +626,7 @@ jobs:
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       EMAIL_USER: ${{ secrets.EMAIL_USER }}
     steps:
-      - name: 📥 Download Logs from VPS
-        uses: appleboy/scp-action@master
-        continue-on-error: true
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          source: /opt/ecapps-hosting/npm_config.log
-          target: logs/
-          strip_components: 4
-
-      - name: 📥 Download Build Logs
+      - name: 📥 Download Logs
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
