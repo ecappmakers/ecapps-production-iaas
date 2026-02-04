@@ -27,16 +27,19 @@ def get_token():
         try:
             url = f"{NPM_BASE_URL}/api/tokens"
             payload = {"identity": NPM_USER, "secret": NPM_PASS}
+            print(f"🔐 Attempt {attempt+1}/{max_attempts}: Connecting to {url}...")
             response = requests.post(url, json=payload, timeout=15, verify=False)
             response.raise_for_status()
+            print(f"✅ Authentication successful")
             return response.json()['token']
         except requests.exceptions.Timeout:
             wait_time = min(2 ** attempt, 10)
-            print(f"⏳ Login timeout (attempt {attempt+1}/{max_attempts}), retrying in {wait_time}s...")
+            print(f"⏳ Request timeout (attempt {attempt+1}/{max_attempts}), retrying in {wait_time}s...")
             time.sleep(wait_time)
         except requests.exceptions.ConnectionError as e:
             wait_time = min(2 ** attempt, 10)
-            print(f"⏳ Connection error (attempt {attempt+1}/{max_attempts}), retrying in {wait_time}s...")
+            print(f"⏳ Connection refused (attempt {attempt+1}/{max_attempts}): {e}")
+            print(f"   Retrying in {wait_time}s...")
             time.sleep(wait_time)
         except Exception as e:
             print(f"❌ Login Failed: {e}")
@@ -134,7 +137,9 @@ def create_proxy_host(token, app):
 
 def main():
     print("🚀 Starting Nginx Proxy Manager Auto-Configuration...")
+    print(f"📍 NPM URL: {NPM_BASE_URL}")
     print(f"⏱️  Timeout configured: {NPM_TIMEOUT}s")
+    print(f"📄 Apps file: {APPS_FILE}\n")
     
     if not os.path.exists(APPS_FILE):
         print("❌ apps.json not found!")
