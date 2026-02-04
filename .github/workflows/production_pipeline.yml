@@ -487,8 +487,8 @@ jobs:
             echo "🔄 Starting schema migrations..."
             
             # Install python MySQL connector if not available
-            docker exec main_db bash -c 'apt-get update && apt-get install -y python3 python3-pip' 2>/dev/null || true
-            docker exec main_db pip3 install mysql-connector-python 2>/dev/null || true
+            apt-get update && apt-get install -y python3 python3-pip 2>/dev/null || true
+            pip3 install mysql-connector-python 2>/dev/null || true
             
             # Process each database
             if [ -d "$BASE/data/schemas" ]; then
@@ -498,22 +498,149 @@ jobs:
                 
                 echo "   🔧 Migrating database: $DB_NAME"
                 
-                # Run migration script
-                python3 << EOF
+                # Run migration script directly (inline Python)
+                python3 << 'PYTHON_SCRIPT'
             import sys
             import json
-            sys.path.insert(0, '/opt/ecapps-hosting/.github/scripts')
-            from schema_migrator import SchemaMigrator
+            import os
+            import mysql.connector
+            from pathlib import Path
+            
+            class SchemaMigrator:
+                def __init__(self, db_host, db_user, db_pass, db_name):
+                    self.host = db_host
+                    self.user = db_user
+                    self.password = db_pass
+                    self.database = db_name
+                    self.connection = None
+                    self.cursor = None
+                
+                def connect(self):
+                    try:
+                        self.connection = mysql.connector.connect(
+                            host=self.host,
+                            user=self.user,
+                            password=self.password,
+                            database=self.database
+                        )
+                        self.cursor = self.connection.cursor()
+                        return True
+                    except Exception as e:
+                        print(f"❌ Connection failed: {e}")
+                        return False
+                
+                def parse_schema_files(self, schema_dir):
+                    schemas = {}
+                    schema_path = Path(schema_dir)
+                    
+                    for json_file in schema_path.glob("*.json"):
+                        try:
+                            with open(json_file, 'r') as f:
+                                schema = json.load(f)
+                                table_name = schema.get('table_name', json_file.stem)
+                                schemas[table_name] = schema
+                        except Exception as e:
+                            print(f"⚠️ Error reading {json_file}: {e}")
+                    
+                    return schemas
+                
+                def create_table_from_json(self, table_name, schema):
+                    try:
+                        columns = schema.get('columns', {})
+                        if not columns:
+                            print(f"⚠️ No columns defined for {table_name}")
+                            return False
+                        
+                        # Build CREATE TABLE statement
+                        sql_parts = [f"CREATE TABLE IF NOT EXISTS `{table_name}` ("]
+                        col_defs = []
+                        
+                        for col_name, col_def in columns.items():
+                            col_sql = f"`{col_name}` {col_def['type']}"
+                            
+                            if col_def.get('primary_key'):
+                                col_sql += " PRIMARY KEY"
+                            if col_def.get('auto_increment'):
+                                col_sql += " AUTO_INCREMENT"
+                            if not col_def.get('nullable', True):
+                                col_sql += " NOT NULL"
+                            if col_def.get('unique'):
+                                col_sql += " UNIQUE"
+                            if col_def.get('default'):
+                                col_sql += f" DEFAULT {col_def['default']}"
+                            
+                            col_defs.append(col_sql)
+                        
+                        sql_parts.append(",\n  ".join(col_defs))
+                        
+                        # Add indexes
+                        indexes = schema.get('indexes', {})
+                        for idx_name, idx_def in indexes.items():
+                            idx_type = idx_def.get('type', 'KEY')
+                            cols = ", ".join([f"`{c}`" for c in idx_def.get('columns', [])])
+                            if idx_type.upper() == "UNIQUE":
+                                sql_parts.append(f"UNIQUE KEY `{idx_name}` ({cols})")
+                            else:
+                                sql_parts.append(f"KEY `{idx_name}` ({cols})")
+                        
+                        # Add foreign keys
+                        fk_count = 0
+                        for col_name, col_def in columns.items():
+                            if col_def.get('foreign_key'):
+                                refs = col_def.get('references', {})
+                                ref_table = refs.get('table')
+                                ref_column = refs.get('column')
+                                if ref_table and ref_column:
+                                    fk_count += 1
+                                    sql_parts.append(f"CONSTRAINT `fk_{table_name}_{col_name}` FOREIGN KEY (`{col_name}`) REFERENCES `{ref_table}` (`{ref_column}`)")
+                        
+                        sql_parts.append(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci")
+                        
+                        sql = ",\n  ".join(sql_parts).replace(",\n  UNIQUE KEY", ",\n  UNIQUE KEY").replace(",\n  KEY", ",\n  KEY").replace(",\n  CONSTRAINT", ",\n  CONSTRAINT")
+                        
+                        self.cursor.execute(sql)
+                        self.connection.commit()
+                        print(f"   ✅ Table created/verified: {table_name}")
+                        return True
+                    except Exception as e:
+                        print(f"   ❌ Error creating table {table_name}: {e}")
+                        return False
+                
+                def migrate(self, schema_dir):
+                    if not self.connect():
+                        return False
+                    
+                    schemas = self.parse_schema_files(schema_dir)
+                    if not schemas:
+                        print(f"   ⚠️ No schema files found in {schema_dir}")
+                        return True
+                    
+                    success = True
+                    for table_name, schema in schemas.items():
+                        if not self.create_table_from_json(table_name, schema):
+                            success = False
+                    
+                    if self.cursor:
+                        self.cursor.close()
+                    if self.connection:
+                        self.connection.close()
+                    
+                    return success
+            
+            # Main execution
+            db_name = os.environ.get('DB_NAME', '')
+            schema_dir = os.environ.get('SCHEMA_DIR', '')
             
             migrator = SchemaMigrator(
                 db_host='$DB_HOST',
                 db_user='$DB_ROOT_USER',
                 db_pass='$DB_ROOT_PASS',
-                db_name='$DB_NAME'
+                db_name=db_name
             )
-            success = migrator.run('$SCHEMA_DIR', dry_run=False, save_history=True)
+            
+            success = migrator.migrate(schema_dir)
             sys.exit(0 if success else 1)
-            EOF
+            PYTHON_SCRIPT
                 
                 if [ $? -eq 0 ]; then
                   echo "   ✅ Migration completed for $DB_NAME"
