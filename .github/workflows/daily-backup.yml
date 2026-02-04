@@ -1,8 +1,8 @@
-name: 🗄️ Daily Backup (Enhanced)
+name: 🗄️ Daily Backup (Cloud Only)
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Midnight UTC
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 jobs:
@@ -11,7 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      # 1. SSH into VPS and create the dump
       - name: 📦 SSH Database Dump
         uses: appleboy/ssh-action@master
         env:
@@ -21,83 +20,59 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: DB_PASS
-          script_stop: true # Stop script on first error
+          script_stop: true
           script: |
-            # Enable strict error handling
             set -euo pipefail
-
-            echo "🔵 Starting Database Backup..."
-            
-            BACKUP_DIR="/opt/ecapps-hosting/backups"
+            BACKUP_DIR="/tmp/db_staging"
             DATE_STAMP=$(date +%F)
-            FILE_NAME="db_${DATE_STAMP}.sql.gz"
-            FILE_PATH="${BACKUP_DIR}/${FILE_NAME}"
-
-            # Ensure directory exists
+            FILE_PATH="${BACKUP_DIR}/db_${DATE_STAMP}.sql.gz"
             mkdir -p "$BACKUP_DIR"
-
-            # Check if container exists
-            if ! docker ps | grep -q main_db; then
-              echo "❌ Error: Docker container 'main_db' is not running."
-              exit 1
-            fi
-
-            # Perform Dump
-            echo "⏳ Dumping database..."
             docker exec main_db mysqldump -u root -p"$DB_PASS" --all-databases | gzip > "$FILE_PATH"
 
-            # Verify file creation and size
-            if [ -f "$FILE_PATH" ] && [ -s "$FILE_PATH" ]; then
-               echo "✅ Backup created successfully: $FILE_NAME"
-               ls -lh "$FILE_PATH"
-            else
-               echo "❌ Error: Backup file is empty or was not created."
-               exit 1
-            fi
-
-            # Clean up old backups (older than 2 days)
-            echo "🧹 Cleaning up old files..."
-            find "$BACKUP_DIR" -name "*.sql.gz" -mtime +2 -delete
-            echo "✅ Cleanup complete."
-
-      # 2. Download the backup file to the GitHub Runner
       - name: ⬇️ Download to Runner
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
-          set -euo pipefail
-          
-          echo "🔵 Configuring SSH..."
           mkdir -p ~/.ssh temp_backups
           echo "$VPS_SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+          scp -i ~/.ssh/id_rsa "$VPS_USER@$VPS_HOST:/tmp/db_staging/*.sql.gz" temp_backups/
 
-          echo "⏳ Downloading files from VPS..."
-          scp -i ~/.ssh/id_rsa "$VPS_USER@$VPS_HOST:/opt/ecapps-hosting/backups/*.sql.gz" temp_backups/
+      - name: 🗑️ Wipe VPS Local Copy
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: rm -rf /tmp/db_staging
 
-          # Verify download
-          echo "🔍 Verifying download..."
-          if [ -z "$(ls -A temp_backups)" ]; then
-             echo "❌ Error: 'temp_backups' directory is empty. Download failed."
-             exit 1
-          else
-             echo "✅ Files downloaded successfully:"
-             ls -R temp_backups/
-          fi
-
-      # 3. Upload to Google Drive (Verbose mode enabled for debugging)
       - name: ☁️ Upload to Google Drive
         uses: wei/rclone@v1
         env:
           RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
         with:
-          # Using -v (verbose) to see config errors if any
-          args: copy temp_backups gdrive:/VPS_Backups/MySQL -v
+          args: copy temp_backups gdrive:/VPS_Backups/MySQL
 
-      # 4. Email Notification (Formatted HTML)
+      - name: 📑 Fetch Historical Metadata
+        shell: bash
+        run: |
+          # Fetch JSON metadata for all files in the folder
+          # Note: This requires your rclone config to have sufficient scopes to read URLs
+          RAW_JSON=$(rclone --config <(echo "${{ secrets.RCLONE_CONFIG }}") lsjson gdrive:/VPS_Backups/MySQL --hash)
+          
+          # Generate HTML list for Email
+          echo "HISTORICAL_HTML<<EOF" >> $GITHUB_ENV
+          echo "$RAW_JSON" | jq -r '.[] | "<li><a href=\"https://drive.google.com/open?id=\(.ID)\">\(.Name)</a> - \((.Size/1024/1024) | printf(\"%.2f\")) MB (Uploaded: \(.ModTime | split(\".\")[0]))</li>"' >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+          # Generate Text list for Telegram
+          echo "HISTORICAL_TEXT<<EOF" >> $GITHUB_ENV
+          echo "$RAW_JSON" | jq -r '.[] | "📄 <a href=\"https://drive.google.com/open?id=\(.ID)\">\(.Name)</a>\n📅 \(.ModTime | split(\".\")[0])\n⚖️ \((.Size/1024/1024) | printf(\"%.2f\")) MB\n"' >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
       - name: 📧 Email Notification
         if: always()
         uses: dawidd6/action-send-mail@v3
@@ -107,55 +82,34 @@ jobs:
           secure: true
           username: ${{ secrets.EMAIL_USER }}
           password: ${{ secrets.EMAIL_PASS }}
-          subject: "💾 Backup Report: ${{ job.status }} - ${{ github.repository }}"
+          subject: "💾 Backup History Report - ${{ github.repository }}"
           to: ecappmakersonline@gmail.com,raajbala1999@gmail.com
           from: "GitHub Actions <${{ secrets.EMAIL_USER }}>"
           html_body: |
-            <h3>Backup Status Report</h3>
-            <p><strong>Repository:</strong> ${{ github.repository }}</p>
-            <p><strong>Status:</strong> ${{ job.status }}</p>
-            <p><strong>Date:</strong> ${{ steps.date.outputs.date }}</p>
+            <h3>Full Backup History (Google Drive)</h3>
+            <p>The latest backup has been uploaded and the VPS staging area has been cleared.</p>
             <hr>
-            <p>The automated database backup workflow has completed.</p>
             <ul>
-              <li><strong>Source:</strong> VPS (Docker/MariaDB)</li>
-              <li><strong>Destination:</strong> Google Drive/VPS_Backups/MySQL</li>
+              ${{ env.HISTORICAL_HTML }}
             </ul>
-            <br>
-            <p><em>This is an automated message from GitHub Actions.</em></p>
+            <hr>
+            <p><em>Links lead directly to the Google Drive file viewer.</em></p>
           attachments: temp_backups/*.sql.gz
 
-      # 5. Telegram Notification (Elegant Layout)
       - name: 📱 Telegram Notification
         if: always()
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          STATUS: ${{ job.status }}
-          GDRIVE_LINK: "https://drive.google.com/drive/folders/1uqzVpVozguaysN5nl0Dg2FdYVoqQisbe"
         run: |
-          # Define Status Icon and Message
-          if [ "$STATUS" == "success" ]; then
-            ICON="✅"
-            HEADER="Backup Successful"
-            MSG="The database has been securely backed up and uploaded to Google Drive."
-          else
-            ICON="❌"
-            HEADER="Backup Failed"
-            MSG="An error occurred during the backup process. Please check GitHub Actions logs."
-          fi
-
-          # Construct HTML Message
-          TEXT="<b>$ICON $HEADER</b>%0A"
+          TEXT="<b>📊 Historical Backup Report</b>%0A"
           TEXT="${TEXT}──────────────────%0A"
-          TEXT="${TEXT}<b>📂 Repo:</b> ${{ github.repository }}%0A"
-          TEXT="${TEXT}<b>📅 Time:</b> $(date '+%Y-%m-%d %H:%M:%S UTC')%0A"
+          TEXT="${TEXT}$HISTORICAL_TEXT"
           TEXT="${TEXT}──────────────────%0A"
-          TEXT="${TEXT}$MSG%0A%0A"
-          TEXT="${TEXT}<a href='$GDRIVE_LINK'>📂 Open Google Drive Folder</a>"
+          TEXT="${TEXT}✅ <b>Status:</b> ${{ job.status }}"
 
-          # Send Request
           curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
             -d chat_id="$CHAT_ID" \
             -d parse_mode="HTML" \
-            -d text="$TEXT"
+            -d text="$TEXT" \
+            -d disable_web_page_preview="true"
