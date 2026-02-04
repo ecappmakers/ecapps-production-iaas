@@ -18,7 +18,39 @@ NPM_PASS = os.environ.get("NPM_PASS")
 
 if not NPM_USER or not NPM_PASS:
     print("❌ Error: NPM_USER and NPM_PASS environment variables are required.")
+    print(f"   NPM_USER: {'SET' if NPM_USER else 'NOT SET'}")
+    print(f"   NPM_PASS: {'SET' if NPM_PASS else 'NOT SET'}")
     sys.exit(1)
+
+def check_npm_health():
+    """Check if NPM API is healthy and ready"""
+    print("🩺 Checking NPM health...")
+    max_wait = 120
+    wait_time = 0
+    
+    while wait_time < max_wait:
+        try:
+            response = requests.get(f"{NPM_BASE_URL}/api/settings", timeout=10, verify=False)
+            status_code = response.status_code
+            
+            # Any 4xx or 5xx indicates the API is responding
+            if status_code in [200, 401, 403, 404, 500]:
+                print(f"✅ NPM API is healthy (HTTP {status_code})")
+                return True
+            else:
+                print(f"   HTTP {status_code} - Waiting... ({max_wait - wait_time}s remaining)")
+        except requests.exceptions.Timeout:
+            print(f"   Timeout - Waiting for NPM... ({max_wait - wait_time}s remaining)")
+        except requests.exceptions.ConnectionError:
+            print(f"   Connection refused - NPM warming up... ({max_wait - wait_time}s remaining)")
+        except Exception as e:
+            print(f"   Error: {e} - Retrying... ({max_wait - wait_time}s remaining)")
+        
+        time.sleep(3)
+        wait_time += 3
+    
+    print("⚠️  NPM health check timeout, but proceeding with configuration...")
+    return False
 
 def get_token():
     """Login and retrieve a Bearer Token with retries"""
@@ -26,18 +58,31 @@ def get_token():
     for attempt in range(max_attempts):
         try:
             url = f"{NPM_BASE_URL}/api/tokens"
+            # Try without expiry first (some NPM versions don't support it)
             payload = {
                 "identity": NPM_USER,
-                "secret": NPM_PASS,
-                "expiry": "1y"  # Request 1-year token validity
+                "secret": NPM_PASS
             }
             print(f"🔐 Attempt {attempt+1}/{max_attempts}: Connecting to {url}...")
+            print(f"   Payload: identity=*****, secret=*****")
+            
             response = requests.post(url, json=payload, timeout=15, verify=False)
+            
+            # Debug info
+            print(f"   Response Status: {response.status_code}")
+            
+            if response.status_code == 400:
+                # Try with expiry parameter
+                print(f"   Retrying with expiry parameter...")
+                payload["expiry"] = "1y"
+                response = requests.post(url, json=payload, timeout=15, verify=False)
+                print(f"   Response Status (with expiry): {response.status_code}")
+            
             response.raise_for_status()
             token = response.json().get('token')
             if not token:
                 raise ValueError("No token in response")
-            print(f"✅ Authentication successful (Token expires in 1 year)")
+            print(f"✅ Authentication successful (Token obtained)")
             return token
         except requests.exceptions.Timeout:
             wait_time = min(2 ** attempt, 10)
@@ -48,6 +93,12 @@ def get_token():
             print(f"⏳ Connection refused (attempt {attempt+1}/{max_attempts}): {e}")
             print(f"   Retrying in {wait_time}s...")
             time.sleep(wait_time)
+        except requests.exceptions.HTTPError as e:
+            print(f"❌ HTTP Error: {e}")
+            print(f"   Response: {response.text}")
+            if response.status_code == 400:
+                print(f"   Credentials may be incorrect or API format differs")
+            sys.exit(1)
         except Exception as e:
             print(f"❌ Login Failed: {e}")
             sys.exit(1)
@@ -157,6 +208,23 @@ def main():
     print(f"📍 NPM URL: {NPM_BASE_URL}")
     print(f"⏱️  Timeout configured: {NPM_TIMEOUT}s")
     print(f"📄 Apps file: {APPS_FILE}\n")
+    
+    # Step 1: Health check
+    print("=" * 50)
+    check_npm_health()
+    print("=" * 50)
+    print()
+    
+    # Verify NPM is reachable
+    print("🔗 Testing NPM connectivity...")
+    try:
+        response = requests.get(f"{NPM_BASE_URL}/api/settings", timeout=10, verify=False)
+        print(f"   NPM is reachable (HTTP {response.status_code})")
+    except Exception as e:
+        print(f"⚠️  Cannot reach NPM: {e}")
+        print(f"   Continuing anyway, authentication may fail...")
+    
+    print()
     
     if not os.path.exists(APPS_FILE):
         print("❌ apps.json not found!")

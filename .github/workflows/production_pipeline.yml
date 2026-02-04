@@ -391,41 +391,6 @@ jobs:
             else
                echo "❌ CRITICAL: nginx_proxy failed to start."
             fi
-            
-            # 5B. WAIT FOR NPM READINESS (API connectivity test)
-            echo "⏳ Waiting for NPM API to be ready..." | tee -a deployment.log
-            NPM_TIMEOUT=90
-            NPM_READY=false
-            
-            while [ $NPM_TIMEOUT -gt 0 ]; do
-              # Check if container is running
-              if ! docker ps | grep -q npm; then
-                echo "⚠️  NPM container not running yet, waiting..."
-                sleep 2
-                NPM_TIMEOUT=$((NPM_TIMEOUT - 2))
-                continue
-              fi
-              
-              # Test API connectivity
-              HTTP_CODE=$(curl -s -k -w "%{http_code}" -o /dev/null https://localhost:81/api/settings -H "Accept: application/json" 2>/dev/null || echo "000")
-              
-              if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "403" ]; then
-                echo "✅ NPM API responded with HTTP $HTTP_CODE - Ready!" | tee -a deployment.log
-                NPM_READY=true
-                break
-              fi
-              
-              echo "   HTTP $HTTP_CODE - NPM warming up... ($NPM_TIMEOUT seconds left)"
-              sleep 3
-              NPM_TIMEOUT=$((NPM_TIMEOUT - 3))
-            done
-            
-            if [ "$NPM_READY" != "true" ]; then
-              echo "⚠️  NPM API did not respond in time, but container is running. Proceeding..." | tee -a deployment.log
-            fi
-            
-            # Additional wait for full initialization
-            sleep 5
 
       - uses: actions/download-artifact@v4
         if: needs.plan.outputs.has_databases == 'true'
@@ -594,7 +559,6 @@ jobs:
       - run: |
           pip install requests urllib3
 
-      # ⚠️ Safety: Normalize types for Python script
       - name: Normalize Apps JSON
         run: |
           jq '.apps |= map(if .type == "node" then .type = "static" else . end)' apps.json > apps_fixed.json && mv apps_fixed.json apps.json
@@ -606,7 +570,20 @@ jobs:
           NPM_BASE_URL: "https://pm.ecapps.in"
           NPM_TIMEOUT: "120"
           APPS_FILE: "apps.json"
-        run: python .github/scripts/configure_npm.py 2>&1 | tee npm_config.log
+        run: |
+          echo "🔍 Validating NPM credentials..."
+          if [ -z "$NPM_USER" ]; then
+            echo "❌ Error: NPM_USER secret is not set"
+            exit 1
+          fi
+          if [ -z "$NPM_PASS" ]; then
+            echo "❌ Error: NPM_PASS secret is not set"
+            exit 1
+          fi
+          echo "✅ NPM credentials are set"
+          echo "📍 NPM URL: $NPM_BASE_URL"
+          echo "🔐 Running configuration..."
+          python .github/scripts/configure_npm.py 2>&1 | tee npm_config.log
 
       - uses: actions/upload-artifact@v4
         if: always()
