@@ -200,14 +200,8 @@ class SchemaMigrator:
 
             columns_sql.append(col_sql)
 
-            # Collect foreign keys
-            if col_obj.get('foreign_key'):
-                refs = col_obj.get('references', {})
-                ref_table = refs.get('table')
-                ref_column = refs.get('column')
-                if ref_table and ref_column:
-                    constraint_name = f"fk_{table_name}_{col_obj['name']}"
-                    constraints.append(f"CONSTRAINT `{constraint_name}` FOREIGN KEY (`{col_obj['name']}`) REFERENCES `{ref_table}` (`{ref_column}`)")
+            # Note: Foreign keys are added AFTER table creation to avoid constraint errors
+            # They are handled separately in apply_migrations()
 
         # Add indexes
         indexes = schema.get('indexes', {})
@@ -485,6 +479,37 @@ class SchemaMigrator:
                         })
                         print(f"🔓 DROP FOREIGN KEY: {fk_name}")
 
+        # SECOND PASS: Add foreign keys for newly created tables
+        # This is done after table creation to avoid constraint errors
+        newly_created_tables = [m['table'] for m in migrations if m['type'] == 'create_table']
+        
+        if newly_created_tables:
+            print(f"\n🔗 Processing foreign keys for newly created tables...")
+            for table_name in newly_created_tables:
+                if table_name in schemas:
+                    schema = schemas[table_name]
+                    schema_cols = schema.get('columns', {})
+                    
+                    if isinstance(schema_cols, list):
+                        schema_cols = {col['name']: col for col in schema_cols}
+                    
+                    for col_name, col_def in schema_cols.items():
+                        if col_def.get('foreign_key'):
+                            refs = col_def.get('references', {})
+                            ref_table = refs.get('table')
+                            ref_column = refs.get('column')
+                            if ref_table and ref_column:
+                                fk_name = f"fk_{table_name}_{col_name}"
+                                sql = self.generate_add_foreign_key(table_name, col_name, ref_table, ref_column)
+                                migrations.append({
+                                    'type': 'add_foreign_key',
+                                    'table': table_name,
+                                    'column': col_name,
+                                    'sql': sql,
+                                    'description': f"Add foreign key {fk_name}"
+                                })
+                                print(f"🔗 ADD FOREIGN KEY: {table_name}.{col_name} -> {ref_table}.{ref_column}")
+
         return migrations
 
     def apply_migrations(self, migrations, dry_run=False):
@@ -495,17 +520,27 @@ class SchemaMigrator:
 
         print(f"\n📋 Generated {len(migrations)} migration(s)\n")
 
+        # Sort migrations to execute in safe order:
+        # 1. CREATE TABLE first
+        # 2. All column and index operations
+        # 3. FOREIGN KEYS last (after all referenced tables exist)
+        create_table_migrations = [m for m in migrations if m['type'] == 'create_table']
+        other_migrations = [m for m in migrations if m['type'] != 'create_table' and m['type'] != 'add_foreign_key']
+        foreign_key_migrations = [m for m in migrations if m['type'] == 'add_foreign_key']
+        
+        sorted_migrations = create_table_migrations + other_migrations + foreign_key_migrations
+
         if dry_run:
             print("🏃 DRY RUN MODE - No changes will be applied\n")
-            for i, migration in enumerate(migrations, 1):
+            for i, migration in enumerate(sorted_migrations, 1):
                 print(f"{i}. {migration['description']}")
                 print(f"   SQL: {migration['sql']}\n")
             return True
 
         try:
             cursor = self.connection.cursor()
-            for i, migration in enumerate(migrations, 1):
-                print(f"[{i}/{len(migrations)}] {migration['description']}")
+            for i, migration in enumerate(sorted_migrations, 1):
+                print(f"[{i}/{len(sorted_migrations)}] {migration['description']}")
                 cursor.execute(migration['sql'])
             self.connection.commit()
             cursor.close()
