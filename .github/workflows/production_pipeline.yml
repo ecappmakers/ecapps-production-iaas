@@ -140,7 +140,8 @@ jobs:
           # Verify output
           if [ -d "${{ matrix.output_dir }}" ]; then
               echo "✅ Build successful! Copying artifacts..."
-              cp -r ${{ matrix.output_dir }}/* ../output/
+              # Use dot slash to prevent path ambiguity
+              cp -r "${{ matrix.output_dir }}"/. ../output/
           else
               echo "❌ Error: Output directory '${{ matrix.output_dir }}' was not found after build."
               echo "📂 Current directory contents:"
@@ -161,10 +162,7 @@ jobs:
     name: 🚀 Deploy to VPS
     needs: [plan, build-containers, build-static]
     runs-on: ubuntu-latest
-    if: |
-      always() && 
-      !contains(needs.build-containers.result, 'failure') && 
-      !contains(needs.build-static.result, 'failure')
+    if: ${{ always() && !contains(needs.build-containers.result, 'failure') && !contains(needs.build-static.result, 'failure') }}
     steps:
       - uses: actions/checkout@v3
       
@@ -364,7 +362,7 @@ jobs:
     needs: deploy
     runs-on: ubuntu-latest
     # Force run even if previous job had non-critical issues (but verify logic inside)
-    if: always() && !contains(needs.deploy.result, 'failure')
+    if: ${{ always() && !contains(needs.deploy.result, 'failure') }}
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
