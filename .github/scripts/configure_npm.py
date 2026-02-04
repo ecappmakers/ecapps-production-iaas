@@ -3,10 +3,15 @@ import json
 import requests
 import sys
 import time
+import urllib3
+
+# Suppress SSL warnings for self-signed certificates
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- CONFIGURATION ---
-NPM_BASE_URL = "https://pm.ecapps.in" # Ensure this matches your Admin Panel URL
-APPS_FILE = "apps.json"
+NPM_BASE_URL = os.environ.get("NPM_BASE_URL", "https://localhost:81")
+APPS_FILE = os.environ.get("APPS_FILE", "apps.json")
+NPM_TIMEOUT = int(os.environ.get("NPM_TIMEOUT", "90"))
 
 NPM_USER = os.environ.get("NPM_USER")
 NPM_PASS = os.environ.get("NPM_PASS")
@@ -16,34 +21,61 @@ if not NPM_USER or not NPM_PASS:
     sys.exit(1)
 
 def get_token():
-    """Login and retrieve a Bearer Token"""
-    try:
-        url = f"{NPM_BASE_URL}/api/tokens"
-        payload = {"identity": NPM_USER, "secret": NPM_PASS}
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-        return response.json()['token']
-    except Exception as e:
-        print(f"❌ Login Failed: {e}")
-        sys.exit(1)
+    """Login and retrieve a Bearer Token with retries"""
+    max_attempts = 5
+    for attempt in range(max_attempts):
+        try:
+            url = f"{NPM_BASE_URL}/api/tokens"
+            payload = {"identity": NPM_USER, "secret": NPM_PASS}
+            response = requests.post(url, json=payload, timeout=15, verify=False)
+            response.raise_for_status()
+            return response.json()['token']
+        except requests.exceptions.Timeout:
+            wait_time = min(2 ** attempt, 10)
+            print(f"⏳ Login timeout (attempt {attempt+1}/{max_attempts}), retrying in {wait_time}s...")
+            time.sleep(wait_time)
+        except requests.exceptions.ConnectionError as e:
+            wait_time = min(2 ** attempt, 10)
+            print(f"⏳ Connection error (attempt {attempt+1}/{max_attempts}), retrying in {wait_time}s...")
+            time.sleep(wait_time)
+        except Exception as e:
+            print(f"❌ Login Failed: {e}")
+            sys.exit(1)
+    
+    print("❌ Could not authenticate after all retries")
+    sys.exit(1)
 
 def get_existing_hosts(token):
-    """Fetch list of already configured domains"""
+    """Fetch list of already configured domains with retries"""
     headers = {"Authorization": f"Bearer {token}"}
-    try:
-        response = requests.get(f"{NPM_BASE_URL}/api/nginx/proxy-hosts", headers=headers, timeout=10)
-        response.raise_for_status()
-        existing = set()
-        for host in response.json():
-            for name in host['domain_names']:
-                existing.add(name)
-        return existing
-    except Exception as e:
-        print(f"❌ Failed to fetch existing hosts: {e}")
-        sys.exit(1)
+    max_attempts = 3
+    
+    for attempt in range(max_attempts):
+        try:
+            response = requests.get(f"{NPM_BASE_URL}/api/nginx/proxy-hosts", headers=headers, timeout=15, verify=False)
+            response.raise_for_status()
+            existing = set()
+            for host in response.json():
+                for name in host['domain_names']:
+                    existing.add(name)
+            return existing
+        except requests.exceptions.Timeout:
+            wait_time = min(2 ** attempt, 10)
+            print(f"⏳ Fetching hosts timeout (attempt {attempt+1}/{max_attempts}), retrying in {wait_time}s...")
+            time.sleep(wait_time)
+        except requests.exceptions.ConnectionError:
+            wait_time = min(2 ** attempt, 10)
+            print(f"⏳ Connection error fetching hosts, retrying in {wait_time}s...")
+            time.sleep(wait_time)
+        except Exception as e:
+            print(f"❌ Failed to fetch existing hosts: {e}")
+            return set()
+    
+    print("⚠️  Could not fetch existing hosts, proceeding without check")
+    return set()
 
 def create_proxy_host(token, app):
-    """Create a new Proxy Host with Auto-SSL"""
+    """Create a new Proxy Host with Auto-SSL and retry logic"""
     headers = {"Authorization": f"Bearer {token}"}
     domain = app.get('domain')
     
@@ -62,7 +94,7 @@ def create_proxy_host(token, app):
         "forward_host": forward_host,
         "forward_port": int(forward_port),
         "access_list_id": 0,
-        "certificate_id": "new", # Auto-Request Let's Encrypt
+        "certificate_id": "new",
         "ssl_forced": True,
         "meta": {
             "letsencrypt_email": NPM_USER,
@@ -77,18 +109,32 @@ def create_proxy_host(token, app):
 
     print(f"⚙️  Configuring {domain} -> {forward_host}:{forward_port}")
 
-    try:
-        response = requests.post(f"{NPM_BASE_URL}/api/nginx/proxy-hosts", headers=headers, json=payload)
-        if response.status_code == 201:
-            print(f"✅ Created: {domain}")
-        else:
-            print(f"⚠️  Failed {domain} (Status: {response.status_code})")
-            print(f"   Response: {response.text}")
-    except Exception as e:
-        print(f"❌ API Error: {e}")
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            response = requests.post(f"{NPM_BASE_URL}/api/nginx/proxy-hosts", headers=headers, json=payload, timeout=15, verify=False)
+            if response.status_code == 201:
+                print(f"✅ Created: {domain}")
+                return True
+            else:
+                print(f"⚠️  Failed {domain} (Status: {response.status_code})")
+                print(f"   Response: {response.text}")
+                return False
+        except requests.exceptions.Timeout:
+            wait_time = min(2 ** attempt, 10)
+            if attempt < max_attempts - 1:
+                print(f"⏳ Request timeout for {domain}, retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                print(f"❌ Could not configure {domain} after retries")
+                return False
+        except Exception as e:
+            print(f"❌ API Error for {domain}: {e}")
+            return False
 
 def main():
     print("🚀 Starting Nginx Proxy Manager Auto-Configuration...")
+    print(f"⏱️  Timeout configured: {NPM_TIMEOUT}s")
     
     if not os.path.exists(APPS_FILE):
         print("❌ apps.json not found!")
@@ -97,33 +143,48 @@ def main():
     with open(APPS_FILE, 'r') as f:
         config = json.load(f)
     
-    # Retry logic for login (in case NPM container is waking up)
-    token = None
-    for attempt in range(3):
-        try:
-            token = get_token()
-            print("🔑 Authenticated successfully.")
-            break
-        except:
-            print(f"⏳ NPM not ready, retrying ({attempt+1}/3)...")
-            time.sleep(5)
+    # Authenticate
+    print("🔐 Authenticating to NPM...")
+    token = get_token()
+    print("✅ Authenticated successfully.")
     
-    if not token:
-        print("❌ Could not connect to NPM after retries.")
-        sys.exit(1)
-
+    # Fetch existing hosts
+    print("📋 Fetching existing proxy hosts...")
     existing_domains = get_existing_hosts(token)
+    print(f"📊 Found {len(existing_domains)} existing domain(s)")
     
-    for app in config.get('apps', []):
-        if app.get('type') == 'migration': continue
-        
+    # Configure apps
+    apps_to_config = [app for app in config.get('apps', []) if app.get('type') != 'migration' and app.get('domain')]
+    if not apps_to_config:
+        print("ℹ️  No applications to configure")
+        return
+    
+    print(f"⚙️  Processing {len(apps_to_config)} application(s)...\n")
+    
+    success_count = 0
+    skip_count = 0
+    fail_count = 0
+    
+    for app in apps_to_config:
         domain = app.get('domain')
-        if not domain: continue
-
+        
         if domain in existing_domains:
             print(f"ℹ️  Skipping {domain} (Already Exists)")
+            skip_count += 1
         else:
-            create_proxy_host(token, app)
+            if create_proxy_host(token, app):
+                success_count += 1
+            else:
+                fail_count += 1
+    
+    # Summary
+    print(f"\n📊 Configuration Summary:")
+    print(f"   ✅ Created: {success_count}")
+    print(f"   ℹ️  Skipped: {skip_count}")
+    print(f"   ❌ Failed:  {fail_count}")
+    
+    if fail_count > 0:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
