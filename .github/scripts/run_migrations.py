@@ -22,7 +22,8 @@ def main():
     
     # Get configuration from environment
     base_dir = os.environ.get('BASE', '/opt/ecapps-hosting')
-    db_host = os.environ.get('DB_HOST', 'main_db')
+    # Use localhost instead of main_db since script runs on VPS host, not inside Docker
+    db_host = os.environ.get('DB_HOST', 'localhost')
     db_user = os.environ.get('DB_ROOT_USER', 'root')
     db_pass = os.environ.get('DB_ROOT_PASS', '')
     

@@ -479,7 +479,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             BASE="/opt/ecapps-hosting"
-            DB_HOST="main_db"
+            DB_HOST="localhost"
             DB_ROOT_USER="root"
             DB_ROOT_PASS="${{ secrets.DB_ROOT_PASSWORD }}"
             
