@@ -291,7 +291,9 @@ jobs:
       - uses: actions/download-artifact@v4
         if: needs.plan.outputs.has_statics == 'true'
         with:
-          pattern: static-site-*, path: temp_static, merge-multiple: false
+          pattern: static-site-*
+          path: temp_static
+          merge-multiple: false
       
       - uses: appleboy/scp-action@master
         if: needs.plan.outputs.has_statics == 'true'
@@ -442,7 +444,5 @@ jobs:
           from: ${{ secrets.EMAIL_USER }}
           body: |
             Build Status: ${{ env.STATUS }}
-            
             ${{ env.EMAIL_BODY }}
-            
             View Logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
