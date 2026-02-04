@@ -27,6 +27,8 @@ jobs:
       has_containers: ${{ steps.set-matrix.outputs.has_containers }}
       matrix_statics: ${{ steps.set-matrix.outputs.statics }}
       has_statics: ${{ steps.set-matrix.outputs.has_statics }}
+      matrix_databases: ${{ steps.set-matrix.outputs.databases }}
+      has_databases: ${{ steps.set-matrix.outputs.has_databases }}
     steps:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v3
@@ -45,18 +47,23 @@ jobs:
           # Logic: Maps 'repo' -> 'repo_url' and handles types case-insensitively
           CONTAINERS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("container|backend")) | . + {repo_url: (.repo_url // .repo)}]}' apps.json)
           STATICS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("static|node")) | . + {repo_url: (.repo_url // .repo)}]}' apps.json)
+          DATABASES=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("database")) | . + {repo_url: (.repo_url // .repo)}]}' apps.json)
 
           COUNT_C=$(echo "$CONTAINERS" | jq '.include | length')
           COUNT_S=$(echo "$STATICS" | jq '.include | length')
+          COUNT_D=$(echo "$DATABASES" | jq '.include | length')
 
           echo "📦 Containers found : $COUNT_C" | tee -a build.log
           echo "⚡ Static Apps found: $COUNT_S" | tee -a build.log
+          echo "🗄️ Database Apps found: $COUNT_D" | tee -a build.log
 
           echo "containers=$CONTAINERS" >> "$GITHUB_OUTPUT"
           echo "statics=$STATICS" >> "$GITHUB_OUTPUT"
+          echo "databases=$DATABASES" >> "$GITHUB_OUTPUT"
 
           [ "$COUNT_C" -gt 0 ] && echo "has_containers=true" >> "$GITHUB_OUTPUT" || echo "has_containers=false" >> "$GITHUB_OUTPUT"
           [ "$COUNT_S" -gt 0 ] && echo "has_statics=true" >> "$GITHUB_OUTPUT" || echo "has_statics=false" >> "$GITHUB_OUTPUT"
+          [ "$COUNT_D" -gt 0 ] && echo "has_databases=true" >> "$GITHUB_OUTPUT" || echo "has_databases=false" >> "$GITHUB_OUTPUT"
 
   # ======================================================
   # 2. BUILD CONTAINERS
@@ -154,13 +161,59 @@ jobs:
           path: built_static.txt
 
   # ======================================================
-  # 4. DEPLOY TO VPS
+  # 3B. FETCH DATABASE SCHEMA
+  # ======================================================
+  build-database:
+    name: 🗄️ Fetch ${{ matrix.name }}
+    needs: plan
+    runs-on: ubuntu-latest
+    if: ${{ needs.plan.outputs.has_databases == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix_databases) }}
+    steps:
+      - name: 📥 Checkout Database Repo
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ matrix.repo_url }}
+          ref: ${{ matrix.branch }}
+          token: ${{ secrets.GH_PAT }}
+          path: db_source
+
+      - name: 📋 Extract Schema
+        run: |
+          set -e
+          echo "==== 📋 PROCESSING: ${{ matrix.name }} ===="
+          
+          mkdir -p output
+          
+          if [ ! -f "db_source/${{ matrix.target_file }}" ]; then
+            echo "❌ Error: Schema file '${{ matrix.target_file }}' not found in repo!"
+            exit 1
+          fi
+
+          cp "db_source/${{ matrix.target_file }}" "output/"
+          echo "✅ Schema file copied: ${{ matrix.target_file }}"
+          echo "🗄️ ${{ matrix.name }} (Database)" >> output/status.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: db-schema-${{ matrix.name }}
+          path: output
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: log-database-${{ matrix.name }}
+          path: output/status.txt
+
+  # ======================================================
+  # 3C. BUILD STATIC SITES (CONTINUED)
   # ======================================================
   deploy:
     name: 🚀 Deploy to VPS
-    needs: [plan, build-containers, build-static]
+    needs: [plan, build-containers, build-static, build-database]
     runs-on: ubuntu-latest
-    if: ${{ always() && !contains(needs.build-containers.result, 'failure') && !contains(needs.build-static.result, 'failure') }}
+    if: ${{ always() && !contains(needs.build-containers.result, 'failure') && !contains(needs.build-static.result, 'failure') && !contains(needs.build-database.result, 'failure') }}
     steps:
       - name: 📥 Checkout Infra
         uses: actions/checkout@v3
@@ -193,6 +246,11 @@ jobs:
             BASE="/opt/ecapps-hosting"
             mkdir -p "$BASE/data/sites" "$BASE/data/mysql" "$BASE/data/init_sql" "$BASE/data/apache"
             cd "$BASE"
+
+            # 1B. Verify schema directory
+            echo "🗄️ Preparing database schema directory..." | tee -a deployment.log
+            rm -f "$BASE/data/init_sql"/*  # Clear old schemas
+            mkdir -p "$BASE/data/init_sql"
 
             # 2. Generate Apache VHosts (Using Safe Append Method)
             echo "📝 Generating Dynamic VHosts..." | tee -a deployment.log
@@ -273,6 +331,23 @@ jobs:
             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
 
+            # 4B. Wait for DB and Apply Schema
+            echo "⏳ Waiting for database to be ready..." | tee -a deployment.log
+            TIMEOUT=60
+            while [ $TIMEOUT -gt 0 ]; do
+              if docker exec main_db mysqladmin ping -u root -p$DB_PASS >/dev/null 2>&1; then
+                echo "✅ Database is ready!" | tee -a deployment.log
+                break
+              fi
+              echo "⏳ Still waiting... ($TIMEOUT seconds left)"
+              sleep 1
+              TIMEOUT=$((TIMEOUT - 1))
+            done
+
+            if [ $TIMEOUT -le 0 ]; then
+              echo "⚠️ Database took too long to start" | tee -a deployment.log
+            fi
+
             # 5. HEALTH CHECK (Critical Safety)
             echo "🩺 Verifying Proxy Health..." | tee -a deployment.log
             sleep 2
@@ -287,6 +362,22 @@ jobs:
             else
                echo "❌ CRITICAL: nginx_proxy failed to start."
             fi
+
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.has_databases == 'true'
+        with:
+          pattern: db-schema-*
+          path: temp_database
+          merge-multiple: false
+
+      - uses: appleboy/scp-action@master
+        if: needs.plan.outputs.has_databases == 'true'
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: temp_database/*
+          target: /opt/ecapps-hosting/temp_schemas
 
       - uses: actions/download-artifact@v4
         if: needs.plan.outputs.has_statics == 'true'
@@ -305,7 +396,7 @@ jobs:
           target: /opt/ecapps-hosting/temp_uploads
 
       - name: 🏁 Finalize & Sync
-        if: needs.plan.outputs.has_statics == 'true'
+        if: ${{ always() }}
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -313,6 +404,27 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             BASE="/opt/ecapps-hosting"
+            
+            # Sync Database Schemas
+            if [ -d "$BASE/temp_schemas/temp_database" ]; then
+                echo "🗄️ Syncing database schemas..."
+                for dir in $BASE/temp_schemas/temp_database/*/; do
+                   [ -d "$dir" ] || continue
+                   SCHEMA_NAME=$(basename "$dir" | sed 's/db-schema-//')
+                   SQL_FILE=$(ls "$dir"*.sql 2>/dev/null | head -1 || echo "")
+                   
+                   if [ -n "$SQL_FILE" ] && [ -f "$SQL_FILE" ]; then
+                      echo "   📋 Applying: $(basename $SQL_FILE)"
+                      cp "$SQL_FILE" "$BASE/data/init_sql/"
+                      echo "✅ Schema ready for initialization: $(basename $SQL_FILE)"
+                   else
+                      echo "⚠️ No SQL file found in schema directory: $SCHEMA_NAME"
+                   fi
+                done
+                rm -rf $BASE/temp_schemas
+            fi
+            
+            # Sync Static Sites
             if [ -d "$BASE/temp_uploads/temp_static" ]; then
                 echo "📦 Syncing static artifacts..."
                 for dir in $BASE/temp_uploads/temp_static/*/; do
@@ -328,6 +440,41 @@ jobs:
                 rm -rf $BASE/temp_uploads
                 # Reload Web Server
                 cd $BASE && docker compose -f docker-compose.yml -f docker-compose.prod.yml restart shared_web
+            fi
+
+      - name: 🩺 Verify Database Schema
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: DB_PASS
+          script: |
+            BASE="/opt/ecapps-hosting"
+            DB_PASS="${{ secrets.DB_ROOT_PASSWORD }}"
+            
+            echo "🗄️ Verifying database schema application..."
+            
+            # Check if schema files exist in init directory
+            SCHEMA_COUNT=$(find $BASE/data/init_sql -name "*.sql" 2>/dev/null | wc -l)
+            if [ "$SCHEMA_COUNT" -gt 0 ]; then
+              echo "✅ Found $SCHEMA_COUNT schema file(s) in initialization directory"
+              ls -lh $BASE/data/init_sql/*.sql
+            else
+              echo "⚠️ No schema files found (this is OK if database already initialized)"
+            fi
+            
+            # Query database to verify it's running and check tables
+            if docker ps | grep -q main_db; then
+              TABLES=$(docker exec main_db mysql -u root -p$DB_PASS -e "SHOW TABLES FROM information_schema LIMIT 1" 2>/dev/null | wc -l)
+              if [ "$TABLES" -gt 0 ]; then
+                echo "✅ Database is operational"
+                docker exec main_db mysql -u root -p$DB_PASS -e "SHOW DATABASES;" | head -10
+              else
+                echo "⚠️ Database query returned no results"
+              fi
+            else
+              echo "⚠️ main_db container is not running"
             fi
 
   # ======================================================
@@ -398,7 +545,7 @@ jobs:
           # Build Message Body
           MESSAGE="<b>Updates:</b>"
           touch apps.txt
-          cat logs/log-container-*.txt logs/log-static-*.txt >> apps.txt 2>/dev/null || true
+          cat logs/log-container-*.txt logs/log-static-*.txt logs/log-database-*.txt >> apps.txt 2>/dev/null || true
           
           if [ -s apps.txt ]; then
              while IFS= read -r line; do MESSAGE+="%0A• $line"; done < apps.txt
