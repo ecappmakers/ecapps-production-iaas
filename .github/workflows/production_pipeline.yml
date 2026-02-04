@@ -314,6 +314,8 @@ jobs:
                 image: mariadb:10.11
                 container_name: main_db
                 restart: always
+                ports:
+                  - '3306:3306'
                 environment:
                   MYSQL_ROOT_PASSWORD: $DB_PASS
                 volumes:
