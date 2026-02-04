@@ -1,10 +1,10 @@
-name: 🔄 Advanced Database Restore
+name: 🔄 Database Restore
 
 on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: '⚠️ TYPE "RESTORE" TO CONFIRM'
+        description: '⚠️ DANGER: Type "RESTORE" to confirm overwriting the database.'
         required: true
         default: 'NO'
       target_db:
@@ -23,7 +23,7 @@ jobs:
     if: ${{ inputs.confirmation == 'RESTORE' }}
     
     steps:
-      # 1. Setup Environment
+      # 1. Setup Environment (Install Rclone & Configure SSH)
       - name: ⚙️ Setup Tools
         env:
           RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
@@ -31,12 +31,22 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
         run: |
           set -euo pipefail
-          mkdir -p ~/.config/rclone ~/.ssh
+          
+          echo "⬇️ Installing Rclone..."
+          # Fix: Explicitly install rclone so we can use the command
+          sudo -v ; curl https://rclone.org/install.sh | sudo bash
+
+          echo "⚙️ Configuring Rclone..."
+          mkdir -p ~/.config/rclone
           echo "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
-          echo "$VPS_SSH_KEY" > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
+
+          echo "🔑 Configuring SSH..."
+          mkdir -p ~/.ssh
+          echo "$VPS_SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
 
-      # 2. Find Specific Backup File
+      # 2. Find and Download Backup File
       - name: 🔍 Find Backup File
         id: finder
         env:
@@ -47,28 +57,27 @@ jobs:
           
           if [ "$DATE_INPUT" == "LATEST" ]; then
              echo "🔵 Searching for LATEST backup..."
-             # Sorts by name (date) and picks last
+             # List files, sort by date/name, pick the last one
              FILE=$(rclone lsf "$REMOTE_PATH" --files-only | sort | tail -n 1)
           else
-             echo "🔵 Searching for backup from date: $DATE_INPUT..."
-             # Filters files matching the date pattern
+             echo "🔵 Searching for backup matching date: $DATE_INPUT..."
              FILE=$(rclone lsf "$REMOTE_PATH" --files-only --include "*$DATE_INPUT*" | sort | tail -n 1)
           fi
 
           if [ -z "$FILE" ]; then
-            echo "❌ Error: No backup found for request '$DATE_INPUT'"
+            echo "❌ Error: No backup file found matching your criteria."
             exit 1
           fi
 
           echo "✅ Found file: $FILE"
           echo "backup_file=$FILE" >> $GITHUB_ENV
 
-          # Download logic
-          echo "⏳ Downloading to runner..."
+          echo "⏳ Downloading file to runner..."
           rclone copy "$REMOTE_PATH/$FILE" ./
+          ls -lh "$FILE"
 
-      # 3. Intelligent Restore
-      - name: 🚀 Streaming Restore
+      # 3. Transfer and Restore on VPS
+      - name: 🚀 Transfer & Restore
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
@@ -83,16 +92,15 @@ jobs:
           ssh -i ~/.ssh/id_rsa "$VPS_USER@$VPS_HOST" "mkdir -p $REMOTE_DIR"
           scp -i ~/.ssh/id_rsa "$FILE_NAME" "$VPS_USER@$VPS_HOST:$REMOTE_DIR/"
 
-          echo "⚙️ Constructing Restore Command..."
+          echo "⚙️ Configuring Restore Command..."
           
-          # Logic to determine command
+          # Determine if we are restoring ALL databases or just ONE
           if [ "$TARGET_DB" == "ALL" ]; then
              echo "⚠️  MODE: FULL SERVER RESTORE (All Databases)"
-             # Standard restore command
              MYSQL_CMD="mysql -u root -p'$DB_PASS'"
           else
              echo "🎯 MODE: SINGLE DATABASE RESTORE ($TARGET_DB)"
-             # -o flag filters the dump to only apply to the specific DB
+             # The --one-database flag ignores SQL statements for other DBs
              MYSQL_CMD="mysql -u root -p'$DB_PASS' --one-database $TARGET_DB"
           fi
 
@@ -100,23 +108,25 @@ jobs:
           ssh -i ~/.ssh/id_rsa "$VPS_USER@$VPS_HOST" << EOF
             set -e
             
-            # 1. If restoring specific DB, ensure it exists first
+            # 1. Create DB if it doesn't exist (only for single DB mode)
             if [ "$TARGET_DB" != "ALL" ]; then
-               echo "Checking if database $TARGET_DB exists..."
+               echo "Checking database existence..."
                docker exec -i main_db mysql -u root -p'$DB_PASS' -e "CREATE DATABASE IF NOT EXISTS $TARGET_DB;"
             fi
 
-            # 2. Pipe file into Docker -> MySQL
-            echo "Importing..."
+            # 2. Unzip and Pipe into Docker
+            echo "Importing SQL Dump..."
             zcat "$REMOTE_DIR/$FILE_NAME" | docker exec -i main_db $MYSQL_CMD
             
             # 3. Cleanup
+            echo "Cleaning up temp files..."
             rm -f "$REMOTE_DIR/$FILE_NAME"
-            echo "✅ Restore Complete"
+            
+            echo "✅ Database restore completed successfully."
           EOF
 
       # 4. Telegram Notification
-      - name: 📱 Telegram Report
+      - name: 📱 Telegram Notification
         if: always()
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -126,10 +136,23 @@ jobs:
           FILE: ${{ env.backup_file }}
         run: |
           if [ "$STATUS" == "success" ]; then
-            MSG="✅ <b>Restore Success</b>%0Adb: <code>$DB_NAME</code>%0Afrom: <code>$FILE</code>"
+            ICON="✅"
+            HEADER="Restore Successful"
+            MSG="Restored <b>$DB_NAME</b> from backup file <code>$FILE</code>."
           else
-            MSG="❌ <b>Restore Failed</b>%0ACheck Logs."
+            ICON="❌"
+            HEADER="Restore Failed"
+            MSG="The restore process failed. Check GitHub Actions logs."
           fi
-          
+
+          TEXT="<b>$ICON $HEADER</b>%0A"
+          TEXT="${TEXT}──────────────────%0A"
+          TEXT="${TEXT}<b>📂 Repo:</b> ${{ github.repository }}%0A"
+          TEXT="${TEXT}<b>📅 Time:</b> $(date '+%H:%M:%S UTC')%0A"
+          TEXT="${TEXT}──────────────────%0A"
+          TEXT="${TEXT}$MSG"
+
           curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-            -d chat_id="$CHAT_ID" -d parse_mode="HTML" -d text="$MSG"
+            -d chat_id="$CHAT_ID" \
+            -d parse_mode="HTML" \
+            -d text="$TEXT"
