@@ -20,38 +20,37 @@ jobs:
   # 1. PLAN & DETECT
   # ======================================================
   plan:
-    name: 🧭 Plan & Detect Applications (Matrix Builder)
+    name: 🧭 Plan & Detect Applications
     runs-on: ubuntu-latest
-
     outputs:
       matrix_containers: ${{ steps.set-matrix.outputs.containers }}
       has_containers: ${{ steps.set-matrix.outputs.has_containers }}
       matrix_statics: ${{ steps.set-matrix.outputs.statics }}
       has_statics: ${{ steps.set-matrix.outputs.has_statics }}
-
     steps:
-      - name: 📥 Checkout Pipeline Repository
+      - name: 📥 Checkout Repository
         uses: actions/checkout@v3
 
-      - name: 🧮 Analyze apps.json & Generate Matrices
+      - name: 🧮 Analyze apps.json
         id: set-matrix
         run: |
           set -e
-          echo "==== APPLICATION DISCOVERY ====" | tee -a build.log
+          echo "==== 🔍 APPLICATION DISCOVERY ====" | tee -a build.log
 
           if [ ! -f apps.json ]; then
-            echo "❌ apps.json missing" | tee -a build.log
+            echo "❌ CRITICAL: apps.json missing" | tee -a build.log
             exit 1
           fi
 
+          # Logic: Maps 'repo' -> 'repo_url' and handles types case-insensitively
           CONTAINERS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("container|backend")) | . + {repo_url: (.repo_url // .repo)}]}' apps.json)
           STATICS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("static|node")) | . + {repo_url: (.repo_url // .repo)}]}' apps.json)
 
           COUNT_C=$(echo "$CONTAINERS" | jq '.include | length')
           COUNT_S=$(echo "$STATICS" | jq '.include | length')
 
-          echo "📦 Containers: $COUNT_C" | tee -a build.log
-          echo "⚡ Statics   : $COUNT_S" | tee -a build.log
+          echo "📦 Containers found : $COUNT_C" | tee -a build.log
+          echo "⚡ Static Apps found: $COUNT_S" | tee -a build.log
 
           echo "containers=$CONTAINERS" >> "$GITHUB_OUTPUT"
           echo "statics=$STATICS" >> "$GITHUB_OUTPUT"
@@ -63,15 +62,13 @@ jobs:
   # 2. BUILD CONTAINERS
   # ======================================================
   build-containers:
-    name: 🐳 Build & Publish Container · ${{ matrix.name }}
+    name: 🐳 Build ${{ matrix.name }}
     needs: plan
     runs-on: ubuntu-latest
     if: ${{ needs.plan.outputs.has_containers == 'true' }}
-
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.plan.outputs.matrix_containers || '{"include":[]}') }}
-
+      matrix: ${{ fromJson(needs.plan.outputs.matrix_containers) }}
     steps:
       - name: 📥 Checkout Source
         uses: actions/checkout@v3
@@ -80,11 +77,9 @@ jobs:
           ref: ${{ matrix.branch }}
           token: ${{ secrets.GH_PAT }}
 
-      - name: 🏷 Resolve Image Namespace
+      - name: 🏷 Prepare Registry
         id: meta
-        run: |
-          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
-          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
       - name: 🔐 Login to GHCR
         uses: docker/login-action@v2
@@ -93,35 +88,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 🔨 Build & Push Image
+      - name: 🔨 Build & Push
         uses: docker/build-push-action@v4
         with:
           context: .
           push: true
           tags: ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.name }}:latest
 
-      - name: 📝 Record Result
-        run: echo "🐳 ${{ matrix.name }} (Container)" | tee -a built_apps.txt build.log
+      - name: 📝 Log Result
+        run: echo "🐳 ${{ matrix.name }} (Container)" | tee -a built_apps.txt
 
-      - name: 📤 Upload Container Log
-        uses: actions/upload-artifact@v4
-        with:
-          name: log-container-${{ matrix.name }}
-          path: built_apps.txt
+      - uses: actions/upload-artifact@v4
+        with: { name: log-container-${{ matrix.name }}, path: built_apps.txt }
 
   # ======================================================
   # 3. BUILD STATIC SITES
   # ======================================================
   build-static:
-    name: ⚡ Build Static Site · ${{ matrix.name }}
+    name: ⚡ Build ${{ matrix.name }}
     needs: plan
     runs-on: ubuntu-latest
     if: ${{ needs.plan.outputs.has_statics == 'true' }}
-
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.plan.outputs.matrix_statics || '{"include":[]}') }}
-
+      matrix: ${{ fromJson(needs.plan.outputs.matrix_statics) }}
     steps:
       - name: 📥 Checkout Source
         uses: actions/checkout@v3
@@ -131,53 +121,44 @@ jobs:
           token: ${{ secrets.GH_PAT }}
           path: source_code
 
-      - name: 🔨 Build Static Site
+      - name: 🔨 Build Application
         run: |
           set -e
-          echo "==== STATIC BUILD: ${{ matrix.name }} ====" | tee -a build.log
-
+          echo "==== 🏗️ BUILDING: ${{ matrix.name }} ===="
+          
           mkdir -p output
           cd source_code
-
+          
+          echo "▶️ Executing: ${{ matrix.build_cmd }}"
           eval "${{ matrix.build_cmd }}"
 
           if [ ! -d "${{ matrix.output_dir }}" ]; then
-            echo "❌ Output directory missing" | tee -a build.log
+            echo "❌ Error: Output directory '${{ matrix.output_dir }}' not found!"
             exit 1
           fi
 
+          # Safe copy using dot syntax
           cp -r "${{ matrix.output_dir }}"/. ../output/
-          echo "⚡ ${{ matrix.name }} (Static)" | tee -a ../built_static.txt ../build.log
+          echo "⚡ ${{ matrix.name }} (Static)" >> ../built_static.txt
 
-      - name: 📤 Upload Static Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: static-site-${{ matrix.name }}
-          path: output
-
-      - name: 📤 Upload Static Log
-        uses: actions/upload-artifact@v4
-        with:
-          name: log-static-${{ matrix.name }}
-          path: built_static.txt
+      - uses: actions/upload-artifact@v4
+        with: { name: static-site-${{ matrix.name }}, path: output }
+      - uses: actions/upload-artifact@v4
+        with: { name: log-static-${{ matrix.name }}, path: built_static.txt }
 
   # ======================================================
   # 4. DEPLOY TO VPS
   # ======================================================
   deploy:
-    name: 🚀 Deploy Infrastructure & Applications (VPS)
-    needs:
-      - plan
-      - build-containers
-      - build-static
+    name: 🚀 Deploy to VPS
+    needs: [plan, build-containers, build-static]
     runs-on: ubuntu-latest
-    if: ${{ always() && !contains(needs['build-containers'].result, 'failure') && !contains(needs['build-static'].result, 'failure') }}
-
+    if: ${{ always() && !contains(needs.build-containers.result, 'failure') && !contains(needs.build-static.result, 'failure') }}
     steps:
-      - name: 📥 Checkout Deployment Files
+      - name: 📥 Checkout Infra
         uses: actions/checkout@v3
 
-      - name: 📤 Upload Infra Files
+      - name: 📤 Upload Files
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -186,11 +167,11 @@ jobs:
           source: docker-compose.yml,apps.json
           target: /opt/ecapps-hosting/
 
-      - name: 🔄 Generate & Apply Infrastructure
+      - name: 🔄 Apply Infrastructure
         uses: appleboy/ssh-action@master
         env:
           GH_USER: ${{ github.actor }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DB_PASS: ${{ secrets.DB_ROOT_PASSWORD }}
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -199,77 +180,145 @@ jobs:
           envs: GH_USER,GH_TOKEN,DB_PASS
           script: |
             set -e
-            echo "==== VPS DEPLOYMENT START ====" | tee -a build.log
+            echo "==== 🚀 VPS DEPLOYMENT START ====" | tee -a deployment.log
 
+            # 1. Setup Environment
             BASE="/opt/ecapps-hosting"
             mkdir -p "$BASE/data/sites" "$BASE/data/mysql" "$BASE/data/init_sql" "$BASE/data/apache"
             cd "$BASE"
 
-            echo "📝 Generating Apache VHosts" | tee -a build.log
+            # 2. Generate Apache VHosts (Using Safe Append Method)
+            echo "📝 Generating Dynamic VHosts..." | tee -a deployment.log
             VHOST_FILE="$BASE/data/apache/vhosts.conf"
             echo "# Auto-generated $(date)" > "$VHOST_FILE"
 
             for row in $(jq -r '.apps[] | select(.type | ascii_downcase | test("static|node")) | @base64' apps.json); do
               _jq() { echo "$row" | base64 --decode | jq -r "$1"; }
               DOMAIN=$(_jq '.domain')
-              [ "$DOMAIN" != "null" ] && [ -n "$DOMAIN" ] && cat <<EOVHOST >> "$VHOST_FILE"
-<VirtualHost *:80>
-  ServerName ${DOMAIN}
-  ServerAlias www.${DOMAIN}
-  DocumentRoot /var/www/html/${DOMAIN}
-  <Directory /var/www/html/${DOMAIN}>
-    AllowOverride All
-    Require all granted
-    FallbackResource /index.html
-  </Directory>
-</VirtualHost>
-
-EOVHOST
+              
+              if [ "$DOMAIN" != "null" ] && [ -n "$DOMAIN" ]; then
+                echo "   ➕ VHost: $DOMAIN"
+                echo "<VirtualHost *:80>" >> "$VHOST_FILE"
+                echo "  ServerName ${DOMAIN}" >> "$VHOST_FILE"
+                echo "  ServerAlias www.${DOMAIN}" >> "$VHOST_FILE"
+                echo "  DocumentRoot /var/www/html/${DOMAIN}" >> "$VHOST_FILE"
+                echo "  <Directory /var/www/html/${DOMAIN}>" >> "$VHOST_FILE"
+                echo "    Options Indexes FollowSymLinks" >> "$VHOST_FILE"
+                echo "    AllowOverride All" >> "$VHOST_FILE"
+                echo "    Require all granted" >> "$VHOST_FILE"
+                echo "    FallbackResource /index.html" >> "$VHOST_FILE"
+                echo "  </Directory>" >> "$VHOST_FILE"
+                echo "</VirtualHost>" >> "$VHOST_FILE"
+                echo "" >> "$VHOST_FILE"
+              fi
             done
 
-            echo "🐳 Generating docker-compose overlay" | tee -a build.log
+            # 3. Generate Docker Compose Overlay
+            echo "🐳 Generating docker-compose.prod.yml..." | tee -a deployment.log
             LOWER_USER=$(echo "$GH_USER" | tr '[:upper:]' '[:lower:]')
             echo "$GH_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
 
             cat > docker-compose.prod.yml <<EOF
-version: "3.8"
-services:
-  shared_web:
-    image: php:8.1-apache
-    restart: always
-    volumes:
-      - "./data/sites:/var/www/html"
-      - "./data/apache/vhosts.conf:/etc/apache2/sites-enabled/000-default.conf"
-    networks: [hosting_net]
-    command: /bin/sh -c "a2enmod headers rewrite && apache2-foreground"
+            version: "3.8"
+            services:
+              shared_web:
+                image: php:8.1-apache
+                container_name: shared_web
+                restart: always
+                volumes:
+                  - "./data/sites:/var/www/html"
+                  - "./data/apache/vhosts.conf:/etc/apache2/sites-enabled/000-default.conf"
+                networks: [hosting_net]
+                command: /bin/sh -c "a2enmod headers rewrite && apache2-foreground"
 
-  db:
-    image: mariadb:10.11
-    restart: always
-    environment:
-      MYSQL_ROOT_PASSWORD: $DB_PASS
-    volumes:
-      - "./data/mysql:/var/lib/mysql"
-      - "./data/init_sql:/docker-entrypoint-initdb.d"
-    networks: [hosting_net]
-EOF
+              db:
+                image: mariadb:10.11
+                container_name: main_db
+                restart: always
+                environment:
+                  MYSQL_ROOT_PASSWORD: $DB_PASS
+                volumes:
+                  - "./data/mysql:/var/lib/mysql"
+                  - "./data/init_sql:/docker-entrypoint-initdb.d"
+                networks: [hosting_net]
+            EOF
 
+            # Inject Containers
             for row in $(jq -r '.apps[] | select(.type | ascii_downcase | test("container|backend")) | @base64' apps.json); do
               _jq() { echo "$row" | base64 --decode | jq -r "$1"; }
               NAME=$(_jq '.name')
+              echo "   ➕ Container: $NAME"
+              
               cat >> docker-compose.prod.yml <<EOF
-  $NAME:
-    image: ghcr.io/$LOWER_USER/$NAME:latest
-    restart: always
-    networks: [hosting_net]
-    environment:
-EOF
-              echo "$row" | base64 --decode | jq -r '.env | to_entries[] | "      \(.key)=\(.value)"' \
+              $NAME:
+                image: ghcr.io/$LOWER_USER/$NAME:latest
+                container_name: $NAME
+                restart: always
+                networks: [hosting_net]
+                environment:
+            EOF
+              echo "$row" | base64 --decode | jq -r '.env | to_entries[] | "      - \(.key)=\(.value)"' \
                 | sed "s/DB_ROOT_PASSWORD/$DB_PASS/" >> docker-compose.prod.yml
             done
 
+            # 4. Apply Changes
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
+
+            # 5. HEALTH CHECK (Critical Safety)
+            echo "🩺 Verifying Proxy Health..." | tee -a deployment.log
+            sleep 2
+            if [ "$(docker inspect -f '{{.State.Running}}' nginx_proxy 2>/dev/null)" != "true" ]; then
+                echo "⚠️ Proxy DOWN. Forcing start..."
+                docker compose -f docker-compose.yml start nginx_proxy || docker start nginx_proxy || true
+                sleep 5
+            fi
+            
+            if [ "$(docker inspect -f '{{.State.Running}}' nginx_proxy 2>/dev/null)" == "true" ]; then
+               echo "✅ HEALTHY: nginx_proxy is running."
+            else
+               echo "❌ CRITICAL: nginx_proxy failed to start."
+            fi
+
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.has_statics == 'true'
+        with: { pattern: static-site-*, path: temp_static, merge-multiple: false }
+      
+      - uses: appleboy/scp-action@master
+        if: needs.plan.outputs.has_statics == 'true'
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: temp_static/*
+          target: /opt/ecapps-hosting/temp_uploads
+
+      - name: 🏁 Finalize & Sync
+        if: needs.plan.outputs.has_statics == 'true'
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            BASE="/opt/ecapps-hosting"
+            if [ -d "$BASE/temp_uploads/temp_static" ]; then
+                echo "📦 Syncing static artifacts..."
+                for dir in $BASE/temp_uploads/temp_static/*/; do
+                   [ -d "$dir" ] || continue
+                   SITE_NAME=$(basename "$dir" | sed 's/static-site-//')
+                   DOMAIN=$(jq -r ".apps[] | select(.name==\"$SITE_NAME\") | .domain" $BASE/apps.json)
+                   
+                   if [ "$DOMAIN" != "null" ]; then
+                      mkdir -p "$BASE/data/sites/$DOMAIN"
+                      rsync -av --delete "$dir" "$BASE/data/sites/$DOMAIN/"
+                   fi
+                done
+                rm -rf $BASE/temp_uploads
+                # Reload Web Server
+                cd $BASE && docker compose -f docker-compose.yml -f docker-compose.prod.yml restart shared_web
+            fi
 
   # ======================================================
   # 5. CONFIGURE PROXY
@@ -279,47 +328,47 @@ EOF
     needs: deploy
     runs-on: ubuntu-latest
     if: ${{ always() && !contains(needs.deploy.result, 'failure') }}
-
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
-        with:
-          python-version: "3.9"
-
+        with: { python-version: "3.9" }
       - run: pip install requests
-      - run: python .github/scripts/configure_npm.py 2>&1 | tee -a build.log npm_log.txt
+
+      # ⚠️ Safety: Normalize types for Python script
+      - name: Normalize Apps JSON
+        run: |
+          jq '.apps |= map(if .type == "node" then .type = "static" else . end)' apps.json > apps_fixed.json && mv apps_fixed.json apps.json
+
+      - env:
+          NPM_USER: ${{ secrets.NPM_USER }}
+          NPM_PASS: ${{ secrets.NPM_PASS }}
+        run: python .github/scripts/configure_npm.py 2>&1 | tee npm_log.txt
 
       - uses: actions/upload-artifact@v4
-        with:
-          name: log-npm
-          path: npm_log.txt
+        with: { name: log-npm, path: npm_log.txt }
 
   # ======================================================
   # 6. NOTIFICATIONS
   # ======================================================
   notify:
-    name: 🔔 Notify · Deployment Summary
-    needs:
-      - deploy
-      - configure-proxy
+    name: 🔔 Notify Summary
+    needs: [deploy, configure-proxy]
     if: always()
     runs-on: ubuntu-latest
-
+    env:
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      EMAIL_USER: ${{ secrets.EMAIL_USER }}
     steps:
       - name: 📥 Download Logs
         uses: actions/download-artifact@v4
         continue-on-error: true
-        with:
-          pattern: log-*
-          path: logs
-          merge-multiple: true
+        with: { pattern: log-*, path: logs, merge-multiple: true }
 
       - name: 🧠 Build Notification Payload
         env:
           DEPLOY_RESULT: ${{ needs.deploy.result }}
           PROXY_RESULT: ${{ needs.configure-proxy.result }}
         run: |
-          set -e
           STATUS="failure"
           EMOJI="❌"
           TITLE="Deployment Failed"
@@ -329,14 +378,55 @@ EOF
             EMOJI="✅"
             TITLE="Deployment Successful"
           fi
+          
+          # Build Message Body
+          MESSAGE="<b>Updates:</b>"
+          touch apps.txt
+          cat logs/log-container-*.txt logs/log-static-*.txt >> apps.txt 2>/dev/null || true
+          
+          if [ -s apps.txt ]; then
+             while IFS= read -r line; do MESSAGE+="%0A• $line"; done < apps.txt
+          else
+             MESSAGE+="%0A• No changes detected."
+          fi
+          
+          if [ -f "logs/npm_log.txt" ]; then
+             MESSAGE+="%0A%0A<b>🌐 Proxy:</b>"
+             grep -E "❌|⚠️|✅" logs/npm_log.txt | while read -r line; do MESSAGE+="%0A$line"; done || true
+          fi
 
           echo "STATUS=$STATUS" >> "$GITHUB_ENV"
           echo "EMOJI=$EMOJI" >> "$GITHUB_ENV"
           echo "TITLE=$TITLE" >> "$GITHUB_ENV"
+          
+          echo "TELEGRAM_MSG=$MESSAGE" >> $GITHUB_ENV
+          CLEAN_BODY=$(echo "$MESSAGE" | sed 's/%0A/\n/g' | sed 's/<b>//g' | sed 's/<\/b>//g')
+          echo "EMAIL_BODY<<EOF" >> $GITHUB_ENV
+          echo "$CLEAN_BODY" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
-      - name: 📤 Upload Full Build Log
-        uses: actions/upload-artifact@v4
-        if: always()
+      - name: 📬 Send Telegram
+        if: ${{ env.TELEGRAM_TOKEN != '' }}
+        env:
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+            -d chat_id="$CHAT_ID" -d parse_mode="HTML" -d text="$EMOJI <b>$TITLE</b>%0A%0A$TELEGRAM_MSG"
+
+      - name: 📧 Send Email
+        if: ${{ env.EMAIL_USER != '' }}
+        uses: dawidd6/action-send-mail@v3
         with:
-          name: build-log
-          path: build.log
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.EMAIL_USER }}
+          password: ${{ secrets.EMAIL_PASS }}
+          subject: ${{ env.EMOJI }} ${{ env.TITLE }} - ${{ github.repository }}
+          to: ecappmakersonline@gmail.com,raajbala1999@gmail.com
+          from: ${{ secrets.EMAIL_USER }}
+          body: |
+            Build Status: ${{ env.STATUS }}
+            ${{ env.EMAIL_BODY }}
+            View Logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
