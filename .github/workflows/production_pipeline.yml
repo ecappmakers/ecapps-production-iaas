@@ -591,7 +591,7 @@ jobs:
           name: log-npm
           path: npm_config.log
 
-  # ======================================================
+# ======================================================
   # 6. NOTIFICATIONS
   # ======================================================
   notify:
@@ -603,6 +603,9 @@ jobs:
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       EMAIL_USER: ${{ secrets.EMAIL_USER }}
     steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v3
+
       - name: 📥 Download Logs
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -611,55 +614,33 @@ jobs:
           path: logs
           merge-multiple: true
 
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
       - name: 🧠 Build Notification Payload
+        id: builder
         env:
           DEPLOY_RESULT: ${{ needs.deploy.result }}
           PROXY_RESULT: ${{ needs.configure-proxy.result }}
         run: |
-          STATUS="failure"
-          EMOJI="❌"
-          TITLE="Deployment Failed"
-
-          if [ "$DEPLOY_RESULT" = "success" ] && { [ "$PROXY_RESULT" = "success" ] || [ "$PROXY_RESULT" = "skipped" ]; }; then
-            STATUS="success"
-            EMOJI="✅"
-            TITLE="Deployment Successful"
-          fi
-          
-          # Build Message Body
-          MESSAGE="<b>Updates:</b>"
-          touch apps.txt
-          cat logs/log-container-*.txt logs/log-static-*.txt logs/log-database-*.txt >> apps.txt 2>/dev/null || true
-          
-          if [ -s apps.txt ]; then
-             while IFS= read -r line; do MESSAGE+="%0A• $line"; done < apps.txt
-          else
-             MESSAGE+="%0A• No changes detected."
-          fi
-          
-          if [ -f "logs/npm_log.txt" ]; then
-             MESSAGE+="%0A%0A<b>🌐 Proxy:</b>"
-             grep -E "❌|⚠️|✅" logs/npm_log.txt | while read -r line; do MESSAGE+="%0A$line"; done || true
-          fi
-
-          echo "STATUS=$STATUS" >> "$GITHUB_ENV"
-          echo "EMOJI=$EMOJI" >> "$GITHUB_ENV"
-          echo "TITLE=$TITLE" >> "$GITHUB_ENV"
-          
-          echo "TELEGRAM_MSG=$MESSAGE" >> $GITHUB_ENV
-          CLEAN_BODY=$(echo "$MESSAGE" | sed 's/%0A/\n/g' | sed 's/<b>//g' | sed 's/<\/b>//g')
-          echo "EMAIL_BODY<<EOF" >> $GITHUB_ENV
-          echo "$CLEAN_BODY" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          chmod +x .github/scripts/notification_builder.py
+          python .github/scripts/notification_builder.py
 
       - name: 📬 Send Telegram
         if: ${{ env.TELEGRAM_TOKEN != '' }}
         env:
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          BOT_TOKEN: ${{ env.TELEGRAM_TOKEN }}
+          EMOJI: ${{ steps.builder.outputs.EMOJI }}
+          TITLE: ${{ steps.builder.outputs.TITLE }}
+          MSG: ${{ steps.builder.outputs.TELEGRAM_MSG }}
         run: |
           curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-            -d chat_id="$CHAT_ID" -d parse_mode="HTML" -d text="$EMOJI <b>$TITLE</b>%0A%0A$TELEGRAM_MSG"
+            -d chat_id="$CHAT_ID" \
+            -d parse_mode="HTML" \
+            -d text="$EMOJI <b>$TITLE</b>%0A%0A$MSG"
 
       - name: 📧 Send Email
         if: ${{ env.EMAIL_USER != '' }}
@@ -668,12 +649,10 @@ jobs:
           server_address: smtp.gmail.com
           server_port: 465
           secure: true
-          username: ${{ secrets.EMAIL_USER }}
+          username: ${{ env.EMAIL_USER }}
           password: ${{ secrets.EMAIL_PASS }}
-          subject: ${{ env.EMOJI }} ${{ env.TITLE }} - ${{ github.repository }}
+          subject: ${{ steps.builder.outputs.EMOJI }} ${{ steps.builder.outputs.TITLE }} - ${{ github.repository }}
           to: ecappmakersonline@gmail.com,raajbala1999@gmail.com
-          from: ${{ secrets.EMAIL_USER }}
-          body: |
-            Build Status: ${{ env.STATUS }}
-            ${{ env.EMAIL_BODY }}
-            View Logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          from: ${{ env.EMAIL_USER }}
+          html_body: file://email_message.html
+          ignore_cert: true
