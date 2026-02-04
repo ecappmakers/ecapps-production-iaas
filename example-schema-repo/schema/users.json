@@ -1,0 +1,61 @@
+{
+  "table_name": "users",
+  "columns": [
+    {
+      "name": "id",
+      "type": "INT",
+      "primary_key": true,
+      "auto_increment": true,
+      "nullable": false
+    },
+    {
+      "name": "username",
+      "type": "VARCHAR(255)",
+      "nullable": false,
+      "unique": true
+    },
+    {
+      "name": "email",
+      "type": "VARCHAR(255)",
+      "nullable": false,
+      "unique": true
+    },
+    {
+      "name": "password_hash",
+      "type": "VARCHAR(255)",
+      "nullable": false
+    },
+    {
+      "name": "created_at",
+      "type": "DATETIME",
+      "nullable": false,
+      "default": "CURRENT_TIMESTAMP"
+    },
+    {
+      "name": "updated_at",
+      "type": "DATETIME",
+      "nullable": true,
+      "default": "CURRENT_TIMESTAMP"
+    },
+    {
+      "name": "is_active",
+      "type": "BOOLEAN",
+      "nullable": false,
+      "default": true
+    }
+  ],
+  "indexes": [
+    {
+      "name": "idx_username",
+      "columns": ["username"]
+    },
+    {
+      "name": "idx_email",
+      "columns": ["email"]
+    },
+    {
+      "name": "idx_created_at",
+      "columns": ["created_at"]
+    }
+  ]
+}

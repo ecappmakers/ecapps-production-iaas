@@ -1,0 +1,49 @@
+{
+  "table_name": "products",
+  "columns": [
+    {
+      "name": "id",
+      "type": "INT",
+      "primary_key": true,
+      "auto_increment": true,
+      "nullable": false
+    },
+    {
+      "name": "name",
+      "type": "VARCHAR(255)",
+      "nullable": false
+    },
+    {
+      "name": "description",
+      "type": "TEXT",
+      "nullable": true
+    },
+    {
+      "name": "price",
+      "type": "DECIMAL(10,2)",
+      "nullable": false
+    },
+    {
+      "name": "stock",
+      "type": "INT",
+      "nullable": false,
+      "default": 0
+    },
+    {
+      "name": "created_at",
+      "type": "DATETIME",
+      "nullable": false,
+      "default": "CURRENT_TIMESTAMP"
+    }
+  ],
+  "indexes": [
+    {
+      "name": "idx_name",
+      "columns": ["name"]
+    },
+    {
+      "name": "idx_price",
+      "columns": ["price"]
+    }
+  ]
+}
