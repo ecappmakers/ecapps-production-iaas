@@ -279,7 +279,10 @@ class SchemaMigrator:
     def generate_drop_column(self, table_name, column_name):
         """Generate ALTER TABLE DROP COLUMN"""
         return f"ALTER TABLE `{table_name}` DROP COLUMN `{column_name}`;"
-f isinstance(index, dict):
+
+    def generate_create_index(self, table_name, index):
+        """Generate CREATE INDEX"""
+        if isinstance(index, dict):
             index_name = index.get('name', f"idx_{table_name}_{index.get('columns', ['id'])[0]}")
             columns = ', '.join([f"`{col}`" for col in index.get('columns', [])])
             index_type = index.get('type', 'NORMAL')
