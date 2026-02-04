@@ -37,10 +37,10 @@ jobs:
         id: set-matrix
         run: |
           set -e
-          echo "==== APPLICATION DISCOVERY ===="
+          echo "==== APPLICATION DISCOVERY ====" | tee -a build.log
 
           if [ ! -f apps.json ]; then
-            echo "❌ apps.json missing"
+            echo "❌ apps.json missing" | tee -a build.log
             exit 1
           fi
 
@@ -50,8 +50,8 @@ jobs:
           COUNT_C=$(echo "$CONTAINERS" | jq '.include | length')
           COUNT_S=$(echo "$STATICS" | jq '.include | length')
 
-          echo "📦 Containers: $COUNT_C"
-          echo "⚡ Statics   : $COUNT_S"
+          echo "📦 Containers: $COUNT_C" | tee -a build.log
+          echo "⚡ Statics   : $COUNT_S" | tee -a build.log
 
           echo "containers=$CONTAINERS" >> "$GITHUB_OUTPUT"
           echo "statics=$STATICS" >> "$GITHUB_OUTPUT"
@@ -66,7 +66,7 @@ jobs:
     name: 🐳 Build & Publish Container · ${{ matrix.name }}
     needs: plan
     runs-on: ubuntu-latest
-    if: needs.plan.outputs.has_containers == 'true'
+    if: ${{ needs.plan.outputs.has_containers == 'true' }}
 
     strategy:
       fail-fast: false
@@ -116,7 +116,7 @@ jobs:
     name: ⚡ Build Static Site · ${{ matrix.name }}
     needs: plan
     runs-on: ubuntu-latest
-    if: needs.plan.outputs.has_statics == 'true'
+    if: ${{ needs.plan.outputs.has_statics == 'true' }}
 
     strategy:
       fail-fast: false
@@ -171,12 +171,7 @@ jobs:
       - build-containers
       - build-static
     runs-on: ubuntu-latest
-
-    if: ${{ 
-      always() &&
-      !contains(needs['build-containers'].result, 'failure') &&
-      !contains(needs['build-static'].result, 'failure')
-    }}
+    if: ${{ always() && !contains(needs['build-containers'].result, 'failure') && !contains(needs['build-static'].result, 'failure') }}
 
     steps:
       - name: 📥 Checkout Deployment Files
@@ -195,7 +190,7 @@ jobs:
         uses: appleboy/ssh-action@master
         env:
           GH_USER: ${{ github.actor }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           DB_PASS: ${{ secrets.DB_ROOT_PASSWORD }}
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -204,13 +199,13 @@ jobs:
           envs: GH_USER,GH_TOKEN,DB_PASS
           script: |
             set -e
-            echo "==== VPS DEPLOYMENT START ===="
+            echo "==== VPS DEPLOYMENT START ====" | tee -a build.log
 
             BASE="/opt/ecapps-hosting"
             mkdir -p "$BASE/data/sites" "$BASE/data/mysql" "$BASE/data/init_sql" "$BASE/data/apache"
             cd "$BASE"
 
-            echo "📝 Generating Apache VHosts"
+            echo "📝 Generating Apache VHosts" | tee -a build.log
             VHOST_FILE="$BASE/data/apache/vhosts.conf"
             echo "# Auto-generated $(date)" > "$VHOST_FILE"
 
@@ -232,7 +227,7 @@ jobs:
 EOF
             done
 
-            echo "🐳 Generating docker-compose overlay"
+            echo "🐳 Generating docker-compose overlay" | tee -a build.log
             LOWER_USER=$(echo "$GH_USER" | tr '[:upper:]' '[:lower:]')
             echo "$GH_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
 
