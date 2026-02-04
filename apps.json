@@ -40,7 +40,7 @@
       "name": "database-schema",
       "type": "database",
       "repo_url": "ecappmakers/database-schema",
-      "branch": "main",
+      "branch": "master",
       "build_cmd": null,
       "output_dir": "./",
       "target_file": "schema.sql"
