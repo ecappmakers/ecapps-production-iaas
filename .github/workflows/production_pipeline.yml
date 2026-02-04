@@ -12,9 +12,10 @@ permissions:
 
 jobs:
   # ======================================================
-  # 1. PLAN (Smart Detection)
+  # 1. PLAN & DETECT (Smart Matrix Generation)
   # ======================================================
   plan:
+    name: 📋 Plan & Detect
     runs-on: ubuntu-latest
     outputs:
       matrix_containers: ${{ steps.set-matrix.outputs.containers }}
@@ -25,96 +26,98 @@ jobs:
       - uses: actions/checkout@v3
 
       - id: set-matrix
-        name: Generate Matrices
+        name: 🧮 Generate Build Matrices
         run: |
-          echo "📂 Debug: Listing files..."
+          set -x # Enable Debug Mode
+          echo "📂 Debug: Validating file structure..."
           ls -la
 
+          if [ ! -f "apps.json" ]; then
+             echo "❌ Critical Error: apps.json not found in root!"
+             exit 1
+          fi
+
           # 1. Generate Container Matrix
-          # Accepts type="container" or "backend"
-          # Maps 'repo' -> 'repo_url' automatically
+          # Logic: Finds types 'container' or 'backend'. Auto-maps 'repo' -> 'repo_url'.
+          echo "🔍 Analyzing Containers..."
           CONTAINERS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("container|backend")) | . + {repo_url: (.repo_url // .repo)}]}' apps.json)
           COUNT_C=$(echo "$CONTAINERS" | jq '.include | length')
           
           echo "containers=$CONTAINERS" >> $GITHUB_OUTPUT
           if [ "$COUNT_C" -gt "0" ]; then
             echo "has_containers=true" >> $GITHUB_OUTPUT
-            echo "✅ Containers found: $COUNT_C"
+            echo "✅ Found $COUNT_C container application(s)."
           else
             echo "has_containers=false" >> $GITHUB_OUTPUT
-            echo "⚠️ No containers found."
+            echo "⚠️ No container applications found."
           fi
 
           # 2. Generate Static Matrix
-          # Accepts type="static" or "node" (Angular/React)
-          # Maps 'repo' -> 'repo_url' automatically
+          # Logic: Finds types 'static' or 'node'. Auto-maps 'repo' -> 'repo_url'.
+          echo "🔍 Analyzing Static Sites..."
           STATICS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("static|node")) | . + {repo_url: (.repo_url // .repo)}]}' apps.json)
           COUNT_S=$(echo "$STATICS" | jq '.include | length')
 
           echo "statics=$STATICS" >> $GITHUB_OUTPUT
           if [ "$COUNT_S" -gt "0" ]; then
             echo "has_statics=true" >> $GITHUB_OUTPUT
-            echo "✅ Static sites found: $COUNT_S"
+            echo "✅ Found $COUNT_S static/SPA application(s)."
           else
             echo "has_statics=false" >> $GITHUB_OUTPUT
-            echo "⚠️ No static sites found."
+            echo "⚠️ No static applications found."
           fi
 
   # ======================================================
   # 2. BUILD CONTAINERS
   # ======================================================
   build-containers:
+    name: 🐳 Build ${{ matrix.name }}
     needs: plan
     runs-on: ubuntu-latest
     if: needs.plan.outputs.has_containers == 'true'
-    
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix_containers) }}
-
     steps:
       - uses: actions/checkout@v3
         with:
           repository: ${{ matrix.repo_url }}
           ref: ${{ matrix.branch }}
           token: ${{ secrets.GH_PAT }}
-
-      - name: Lowercase Repo Owner
+      
+      - name: 🏷️ Prepare Meta
         id: meta
-        run: |
-          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_OUTPUT
-
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_OUTPUT
+      
       - uses: docker/login-action@v2
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
+      
       - uses: docker/build-push-action@v4
+        name: 🔨 Build & Push
         with:
           context: .
           push: true
           tags: ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.name }}:latest
-
-      - run: echo "${{ matrix.name }} (Container)" >> built_apps.txt
-
+      
+      - run: echo "🐳 ${{ matrix.name }} (Container)" >> built_apps.txt
+      
       - uses: actions/upload-artifact@v4
-        with:
-          name: log-container-${{ matrix.name }}
-          path: built_apps.txt
+        with: { name: log-container-${{ matrix.name }}, path: built_apps.txt }
 
   # ======================================================
   # 3. BUILD STATIC SITES
   # ======================================================
   build-static:
+    name: ⚡ Build ${{ matrix.name }}
     needs: plan
     runs-on: ubuntu-latest
     if: needs.plan.outputs.has_statics == 'true'
-    
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix_statics) }}
-
     steps:
       - uses: actions/checkout@v3
         with:
@@ -122,58 +125,60 @@ jobs:
           ref: ${{ matrix.branch }}
           token: ${{ secrets.GH_PAT }}
           path: source_code
-
-      - name: Build
+      
+      - name: 🔨 Install & Build
         run: |
+          set -x
+          echo "🚀 Starting build for ${{ matrix.name }}..."
           mkdir -p output
           cd source_code
+          
+          # Execute user-defined build command
+          echo "▶️ Running: ${{ matrix.build_cmd }}"
           ${{ matrix.build_cmd }}
           
+          # Verify output
           if [ -d "${{ matrix.output_dir }}" ]; then
+              echo "✅ Build successful! Copying artifacts..."
               cp -r ${{ matrix.output_dir }}/* ../output/
           else
-              echo "❌ Output dir ${{ matrix.output_dir }} missing!"
+              echo "❌ Error: Output directory '${{ matrix.output_dir }}' was not found after build."
+              echo "📂 Current directory contents:"
+              ls -la
               exit 1
           fi
-          echo "${{ matrix.name }} (Static)" >> ../built_static.txt
-
+          echo "⚡ ${{ matrix.name }} (Static)" >> ../built_static.txt
+      
       - uses: actions/upload-artifact@v4
-        with:
-          name: static-site-${{ matrix.name }}
-          path: output
-
+        with: { name: static-site-${{ matrix.name }}, path: output }
       - uses: actions/upload-artifact@v4
-        with:
-          name: log-static-${{ matrix.name }}
-          path: built_static.txt
+        with: { name: log-static-${{ matrix.name }}, path: built_static.txt }
 
   # ======================================================
-  # 4. DEPLOY TO VPS (With Dynamic VHost Generation)
+  # 4. DEPLOY TO VPS (The Brain)
   # ======================================================
   deploy:
+    name: 🚀 Deploy to VPS
     needs: [plan, build-containers, build-static]
     runs-on: ubuntu-latest
     if: |
       always() && 
       !contains(needs.build-containers.result, 'failure') && 
       !contains(needs.build-static.result, 'failure')
-
     steps:
       - uses: actions/checkout@v3
       
-      # 1. Upload Base Infra AND apps.json
-      - name: Update Base Infra
+      - name: 📤 Upload Infrastructure Files
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          # ⚠️ CRITICAL: Upload apps.json so the server can generate VHOSTS
+          # ⚠️ Syncing both files is critical for Dynamic VHosts
           source: "docker-compose.yml,apps.json"
           target: /opt/ecapps-hosting/
 
-      # 2. Generate Configs & Deploy
-      - name: Update Apps & DB
+      - name: 🔄 Sync & Reload Infrastructure
         uses: appleboy/ssh-action@master
         env:
           GH_USER: ${{ github.actor }}
@@ -185,37 +190,36 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: GH_USER,GH_TOKEN,DB_PASS
           script: |
-            # Self-Healing: Install jq if missing
+            set -x # 🔍 ENABLE VERBOSE LOGGING
+            
+            # --- 1. PRE-FLIGHT CHECKS ---
+            echo "🔍 Checking server environment..."
             if ! command -v jq &> /dev/null; then
-                if [ "$EUID" -ne 0 ]; then
-                  echo "⚠️ jq missing - skipping install (not root)"
-                else
-                  export DEBIAN_FRONTEND=noninteractive
-                  apt-get update && apt-get install -y jq
-                fi
+                echo "⚠️ 'jq' is missing. Attempting installation..."
+                [ "$EUID" -eq 0 ] && (export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y jq)
             fi
 
             BASE="/opt/ecapps-hosting"
             mkdir -p $BASE/data/sites $BASE/data/mysql $BASE/data/init_sql $BASE/data/apache
             cd $BASE
-
+            
             if [ ! -f "apps.json" ]; then
-               echo "❌ Error: apps.json missing on server!"
-               exit 1
+                echo "❌ CRITICAL: apps.json failed to upload."
+                exit 1
             fi
 
-            # ---------------------------------------------------------
-            # 1. GENERATE DYNAMIC VHOSTS.CONF (The Logic you liked)
-            # ---------------------------------------------------------
+            # --- 2. GENERATE DYNAMIC VHOSTS (Apache Config) ---
+            echo "📝 Generating Dynamic Apache VHosts..."
             VHOST_FILE="$BASE/data/apache/vhosts.conf"
-            echo "# Auto-generated VHosts by Pipeline - $(date)" > $VHOST_FILE
-
-            # Loop through static/node apps and write VirtualHost blocks
+            echo "# Auto-generated by GitHub Pipeline - $(date)" > $VHOST_FILE
+            
+            # Filter for static/node apps
             for row in $(jq -r '.apps[] | select(.type | ascii_downcase | test("static|node")) | @base64' apps.json); do
                 _jq() { echo $row | base64 --decode | jq -r "$1"; }
                 DOMAIN=$(_jq '.domain')
                 
                 if [ "$DOMAIN" != "null" ] && [ ! -z "$DOMAIN" ]; then
+                    echo "   ➕ Adding VHost for: $DOMAIN"
                     echo "<VirtualHost *:80>" >> $VHOST_FILE
                     echo "    ServerName $DOMAIN" >> $VHOST_FILE
                     echo "    ServerAlias www.$DOMAIN" >> $VHOST_FILE
@@ -224,38 +228,36 @@ jobs:
                     echo "        Options Indexes FollowSymLinks" >> $VHOST_FILE
                     echo "        AllowOverride All" >> $VHOST_FILE
                     echo "        Require all granted" >> $VHOST_FILE
-                    # This enables SPA routing (React/Angular)
+                    # 💡 SPA Support (React/Angular routing fix)
                     echo "        FallbackResource /index.html" >> $VHOST_FILE
                     echo "    </Directory>" >> $VHOST_FILE
                     echo "</VirtualHost>" >> $VHOST_FILE
                     echo "" >> $VHOST_FILE
                 fi
             done
-            echo "✅ Generated vhosts.conf with $(grep -c '<VirtualHost' $VHOST_FILE) sites."
+            echo "✅ VHosts generated successfully."
 
-            # ---------------------------------------------------------
-            # 2. GENERATE DYNAMIC DOCKER COMPOSE
-            # ---------------------------------------------------------
+            # --- 3. GENERATE DYNAMIC DOCKER COMPOSE ---
+            echo "🐳 Generating Dynamic Compose Overlay..."
             LOWER_USER=$(echo "$GH_USER" | tr '[:upper:]' '[:lower:]')
             echo $GH_TOKEN | docker login ghcr.io -u $LOWER_USER --password-stdin
 
             cat > docker-compose.prod.yml <<EOF
             version: '3.8'
             services:
-              # Shared Web Service with Mounted VHosts
+              # Shared Web Service (Apache)
               shared_web:
                 image: php:8.1-apache
                 container_name: shared_web
                 restart: always
                 volumes: 
                   - "./data/sites:/var/www/html"
-                  # Mount the generated config file
                   - "./data/apache/vhosts.conf:/etc/apache2/sites-enabled/000-default.conf"
                 networks: [ hosting_net ]
-                # Ensure headers/rewrite modules are on
+                # Enable required modules
                 command: /bin/sh -c "a2enmod headers rewrite && docker-php-entrypoint apache2-foreground"
-
-              # Database
+              
+              # Database Service
               db:
                 image: mariadb:10.11
                 container_name: main_db
@@ -265,14 +267,15 @@ jobs:
                 networks: [ hosting_net ]
             EOF
 
-            # Add Dynamic Containers
+            # Inject Dynamic Containers
             CONTAINER_COUNT=$(jq '[.apps[] | select(.type | ascii_downcase | test("container|backend"))] | length' apps.json)
             if [ "$CONTAINER_COUNT" -gt "0" ]; then
+                echo "   ➕ Injecting $CONTAINER_COUNT dynamic containers..."
                 for row in $(jq -r '.apps[] | select(.type | ascii_downcase | test("container|backend")) | @base64' apps.json); do
                   _jq() { echo $row | base64 --decode | jq -r "$1"; }
                   NAME=$(_jq '.name')
                   IMAGE="ghcr.io/$LOWER_USER/$NAME:latest"
-
+                  
                   echo "  $NAME:" >> docker-compose.prod.yml
                   echo "    image: $IMAGE" >> docker-compose.prod.yml
                   echo "    container_name: $NAME" >> docker-compose.prod.yml
@@ -281,24 +284,39 @@ jobs:
                   echo "    environment:" >> docker-compose.prod.yml
                   
                   echo $row | base64 --decode | jq -r '.env | to_entries | .[] | .key + "=" + .value' | while read line; do
-                    KEY=$(echo $line | cut -d= -f1)
-                    VAL=$(echo $line | cut -d= -f2)
+                    KEY=$(echo $line | cut -d= -f1); VAL=$(echo $line | cut -d= -f2)
                     [ "$VAL" = "DB_ROOT_PASSWORD" ] && VAL="$DB_PASS"
                     echo "      - $KEY=$VAL" >> docker-compose.prod.yml
                   done
                 done
             fi
 
-            # Deploy Both Files (Overlay Strategy)
+            # --- 4. EXECUTE DEPLOYMENT (Overlay Strategy) ---
+            echo "🚀 Applying Infrastructure..."
             docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
 
-      # 3. Handle Static Sites
+            # --- 5. HEALTH CHECK (nginx_proxy) ---
+            echo "🩺 Health Check: Verifying 'nginx_proxy'..."
+            sleep 2
+            if [ "$(docker inspect -f '{{.State.Running}}' nginx_proxy 2>/dev/null)" != "true" ]; then
+                echo "⚠️ nginx_proxy is DOWN! Attempting force start..."
+                docker compose -f docker-compose.yml start nginx_proxy || docker start nginx_proxy || true
+                sleep 5
+            fi
+
+            if [ "$(docker inspect -f '{{.State.Running}}' nginx_proxy 2>/dev/null)" == "true" ]; then
+               echo "✅ HEALTHY: nginx_proxy is running."
+            else
+               echo "❌ CRITICAL: nginx_proxy failed to start."
+               docker logs --tail 20 nginx_proxy
+            fi
+
       - uses: actions/download-artifact@v4
         if: needs.plan.outputs.has_statics == 'true'
         with: { pattern: static-site-*, path: temp_static, merge-multiple: false }
-
+      
       - uses: appleboy/scp-action@master
         if: needs.plan.outputs.has_statics == 'true'
         with:
@@ -307,8 +325,8 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           source: temp_static/*
           target: /opt/ecapps-hosting/temp_uploads
-
-      - name: Finalize Static
+      
+      - name: 🏁 Finalize & Sync Static Sites
         if: needs.plan.outputs.has_statics == 'true'
         uses: appleboy/ssh-action@master
         with:
@@ -316,43 +334,60 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            set -x
             BASE="/opt/ecapps-hosting"
-            mkdir -p $BASE/temp_uploads
             
             if [ -d "$BASE/temp_uploads/temp_static" ]; then
+                echo "📦 Syncing static files..."
                 for dir in $BASE/temp_uploads/temp_static/*/; do
                    [ -d "$dir" ] || continue
                    SITE_NAME=$(basename "$dir" | sed 's/static-site-//')
                    DOMAIN=$(jq -r ".apps[] | select(.name==\"$SITE_NAME\") | .domain" $BASE/apps.json)
                    
-                   if [ "$DOMAIN" != "null" ] && [ ! -z "$DOMAIN" ]; then
+                   if [ "$DOMAIN" != "null" ]; then
+                      echo "   🔄 Syncing $SITE_NAME -> $DOMAIN"
                       mkdir -p "$BASE/data/sites/$DOMAIN"
                       rsync -av --delete "$dir" "$BASE/data/sites/$DOMAIN/"
                    fi
                 done
                 rm -rf $BASE/temp_uploads
                 
-                # Reload Apache to pick up new files & config
-                cd $BASE
-                docker compose -f docker-compose.yml -f docker-compose.prod.yml restart shared_web
+                echo "🔄 Restarting Shared Web to apply new VHosts..."
+                cd $BASE && docker compose -f docker-compose.yml -f docker-compose.prod.yml restart shared_web
             fi
 
   # ======================================================
-  # 5. CONFIGURE PROXY
+  # 5. CONFIGURE PROXY (Force Run)
   # ======================================================
   configure-proxy:
+    name: 🌐 Configure NPM Proxy
     needs: deploy
     runs-on: ubuntu-latest
-    if: needs.deploy.result == 'success'
+    # Force run even if previous job had non-critical issues (but verify logic inside)
+    if: always() && !contains(needs.deploy.result, 'failure')
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with: { python-version: '3.9' }
       - run: pip install requests
+      
+      - name: 🔄 Normalize Apps JSON
+        run: |
+          set -x
+          echo "Original apps.json:"
+          cat apps.json
+          
+          # Convert 'node' types to 'static' so the Python script processes them correctly
+          jq '.apps |= map(if .type == "node" then .type = "static" else . end)' apps.json > apps_fixed.json && mv apps_fixed.json apps.json
+          
+          echo "Normalized apps.json:"
+          cat apps.json
+
       - env:
           NPM_USER: ${{ secrets.NPM_USER }}
           NPM_PASS: ${{ secrets.NPM_PASS }}
         run: python .github/scripts/configure_npm.py 2>&1 | tee npm_log.txt
+      
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: log-npm, path: npm_log.txt }
@@ -361,32 +396,27 @@ jobs:
   # 6. NOTIFICATIONS
   # ======================================================
   notify:
+    name: 🔔 Notify Status
     needs: [deploy, configure-proxy]
     if: always()
     runs-on: ubuntu-latest
     env:
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       EMAIL_USER: ${{ secrets.EMAIL_USER }}
-
     steps:
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with: { pattern: log-*, path: logs, merge-multiple: true }
       
-      - name: Prepare Message
-        id: msg
+      - name: 📝 Prepare Notification
         env:
           DEPLOY_STATUS: ${{ needs.deploy.result }}
           PROXY_STATUS: ${{ needs.configure-proxy.result }}
         run: |
           if [ "$DEPLOY_STATUS" == "success" ] && ( [ "$PROXY_STATUS" == "success" ] || [ "$PROXY_STATUS" == "skipped" ] ); then
-             echo "EMOJI=✅" >> $GITHUB_ENV
-             echo "TITLE=Pipeline Success" >> $GITHUB_ENV
-             echo "STATUS=success" >> $GITHUB_ENV
+             echo "EMOJI=✅" >> $GITHUB_ENV; echo "TITLE=Pipeline Success" >> $GITHUB_ENV; echo "STATUS=success" >> $GITHUB_ENV
           else
-             echo "EMOJI=❌" >> $GITHUB_ENV
-             echo "TITLE=Pipeline Failed" >> $GITHUB_ENV
-             echo "STATUS=failure" >> $GITHUB_ENV
+             echo "EMOJI=❌" >> $GITHUB_ENV; echo "TITLE=Pipeline Failed" >> $GITHUB_ENV; echo "STATUS=failure" >> $GITHUB_ENV
           fi
           
           MESSAGE="<b>Updates:</b>"
@@ -411,7 +441,7 @@ jobs:
           echo "$CLEAN_BODY" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: Telegram
+      - name: 📬 Send Telegram
         if: ${{ env.TELEGRAM_TOKEN != '' }}
         env:
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -420,7 +450,7 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
             -d chat_id="$CHAT_ID" -d parse_mode="HTML" -d text="$EMOJI <b>$TITLE</b>%0A%0A$TELEGRAM_MSG"
 
-      - name: Send Email
+      - name: 📧 Send Email
         if: ${{ env.EMAIL_USER != '' }}
         uses: dawidd6/action-send-mail@v3
         with:
