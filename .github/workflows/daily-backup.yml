@@ -2,8 +2,8 @@ name: 🗄️ Daily Backup (Scripted)
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Midnight UTC
-  workflow_dispatch:      # Manual trigger
+    - cron: '0 0 * * *'
+  workflow_dispatch:
   push:
     branches:
       - production
@@ -39,9 +39,12 @@ jobs:
           command_timeout: 15m
           script: |
             set -euo pipefail
+            # Define and create a fresh staging directory
             BACKUP_DIR="/tmp/db_staging"
+            rm -rf "$BACKUP_DIR" # Remove if left over from a previous crash
             mkdir -p "$BACKUP_DIR"
-            # Dump all databases into a single compressed file
+            
+            echo "🔵 Creating compressed dump..."
             docker exec main_db mysqldump -u root -p"$DB_PASS" --all-databases | gzip > "${BACKUP_DIR}/db_$(date +%F).sql.gz"
 
       - name: ⬇️ Download to Runner
@@ -54,27 +57,27 @@ jobs:
           echo "$VPS_SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
-          # SCP with 5 minute connection timeout
           scp -o ConnectTimeout=300 -i ~/.ssh/id_rsa "$VPS_USER@$VPS_HOST:/tmp/db_staging/*.sql.gz" temp_backups/
 
-      - name: 🗑️ Wipe VPS Local Copy
+      - name: 🗑️ Wipe VPS Local Folder
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           connect_timeout: 5m
-          script: rm -rf /tmp/db_staging
+          script: |
+            # Deletes the entire staging directory and its contents
+            rm -rf /tmp/db_staging
+            echo "✅ Local staging directory removed."
 
       - name: ☁️ Upload & Fetch History
         env:
           RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
         run: |
           echo "$RCLONE_CONF" > rclone.conf
-          # 1. Sync files to Google Drive
           rclone --config rclone.conf copy temp_backups gdrive:/VPS_Backups/MySQL
-          # 2. Fetch JSON and process via the script in the checked-out repo
-          rclone --config rclone.conf lsjson gdrive:/VPS_Backups/MySQL | python3 "${{ github.workspace }}/.github/scripts/process_backups.py"
+          rclone --config rclone.conf lsjson gdrive:/VPS_Backups/MySQL | python3 "${{ github.workspace }}/scripts/process_backups.py"
 
       - name: 📧 Email Notification
         if: always()
@@ -92,9 +95,7 @@ jobs:
             <h3>Backup History Report</h3>
             <p><strong>Status:</strong> ${{ job.status }}</p>
             <hr>
-            <ul>
-              ${{ env.HISTORICAL_HTML }}
-            </ul>
+            <ul>${{ env.HISTORICAL_HTML }}</ul>
           attachments: temp_backups/*.sql.gz
 
       - name: 📱 Telegram Notification
@@ -103,13 +104,9 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # Safe URL Encoding for Telegram text
           HEADER="<b>📊 Backup Report</b>%0A──────────────────%0A"
           FOOTER="──────────────────%0A✅ <b>Status:</b> ${{ job.status }}"
-          
-          # Using python to encode the history text to avoid shell character breakages
           python3 -c "import os, urllib.parse; print(urllib.parse.quote(os.environ.get('HISTORICAL_TEXT', '')))" > encoded.txt
-          
           curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
             -d chat_id="$CHAT_ID" \
             -d parse_mode="HTML" \
