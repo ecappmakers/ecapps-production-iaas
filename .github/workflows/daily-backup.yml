@@ -77,7 +77,7 @@ jobs:
         run: |
           echo "$RCLONE_CONF" > rclone.conf
           rclone --config rclone.conf copy temp_backups gdrive:/VPS_Backups/MySQL
-          rclone --config rclone.conf lsjson gdrive:/VPS_Backups/MySQL | python3 "${{ github.workspace }}/scripts/process_backups.py"
+          rclone --config rclone.conf lsjson gdrive:/VPS_Backups/MySQL | python3 "${{ github.workspace }}/.github/scripts/process_backups.py"
 
       - name: 📧 Email Notification
         if: always()
