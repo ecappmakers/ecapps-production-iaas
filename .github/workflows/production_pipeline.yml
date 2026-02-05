@@ -321,7 +321,8 @@ jobs:
                   - "./data/sites:/var/www/html"
                   - "./data/apache/vhosts.conf:/etc/apache2/sites-enabled/000-default.conf"
                 networks: [hosting_net]
-                command: /bin/sh -c "a2enmod headers rewrite && apache2-foreground"
+                command: /bin/sh -c "docker-php-ext-install mysqli && a2enmod headers rewrite && apache2-foreground"
+
 
               db:
                 image: mariadb:10.11
