@@ -33,8 +33,8 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: DB_PASS
           script_stop: true
-          command_timeout: 10m      # Time for the script to run
-          connect_timeout: 5m      # 5-minute connection timeout as requested
+          connect_timeout: 5m
+          command_timeout: 15m
           script: |
             set -euo pipefail
             BACKUP_DIR="/tmp/db_staging"
@@ -53,7 +53,6 @@ jobs:
           echo "$VPS_SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
-          # Added -o ConnectTimeout to scp as well
           scp -o ConnectTimeout=300 -i ~/.ssh/id_rsa "$VPS_USER@$VPS_HOST:/tmp/db_staging/*.sql.gz" temp_backups/
 
       - name: 🗑️ Wipe VPS Local Copy
@@ -80,7 +79,7 @@ jobs:
           echo "$RCLONE_CONF" > rclone.conf
           rclone --config rclone.conf lsjson gdrive:/VPS_Backups/MySQL > history.json
           
-          # Use Quoted Heredocs ('EOF') to prevent shell character interpretation
+          # SAFE WAY: Write JQ filter to a file using Quoted Heredoc
           cat << 'EOF' > filter_html.jq
           .[] | "<li><a href=\"https://drive.google.com/open?id=\(.ID)\">\(.Name)</a> - \((.Size/1024/1024) | printf(\"%.2f\")) MB (Uploaded: \(.ModTime | split(\"T\")[0]))</li>"
           EOF
@@ -89,14 +88,14 @@ jobs:
           .[] | "📄 <a href=\"https://drive.google.com/open?id=\(.ID)\">\(.Name)</a>\n📅 \(.ModTime | split(\"T\")[0])\n⚖️ \((.Size/1024/1024) | printf(\"%.2f\")) MB\n"
           EOF
 
-          # Save to ENV safely using unique delimiters
-          echo "HISTORICAL_HTML<<HTML_DELIM" >> "$GITHUB_ENV"
+          # Process and append to environment
+          echo "HISTORICAL_HTML<<HTML_BLOCK" >> "$GITHUB_ENV"
           jq -r -f filter_html.jq history.json >> "$GITHUB_ENV"
-          echo "HTML_DELIM" >> "$GITHUB_ENV"
+          echo "HTML_BLOCK" >> "$GITHUB_ENV"
 
-          echo "HISTORICAL_TEXT<<TEXT_DELIM" >> "$GITHUB_ENV"
+          echo "HISTORICAL_TEXT<<TEXT_BLOCK" >> "$GITHUB_ENV"
           jq -r -f filter_text.jq history.json >> "$GITHUB_ENV"
-          echo "TEXT_DELIM" >> "$GITHUB_ENV"
+          echo "TEXT_BLOCK" >> "$GITHUB_ENV"
 
       - name: 📧 Email Notification
         if: always()
@@ -107,12 +106,12 @@ jobs:
           secure: true
           username: ${{ secrets.EMAIL_USER }}
           password: ${{ secrets.EMAIL_PASS }}
-          subject: "💾 Backup History Report - ${{ github.repository }}"
+          subject: "💾 Backup Report - ${{ github.repository }}"
           to: ecappmakersonline@gmail.com,raajbala1999@gmail.com
           from: "GitHub Actions <${{ secrets.EMAIL_USER }}>"
           html_body: |
-            <h3>Full Backup History (Google Drive)</h3>
-            <p>Latest backup status: <b>${{ job.status }}</b></p>
+            <h3>Google Drive Backup History</h3>
+            <p>Status: <b>${{ job.status }}</b></p>
             <hr>
             <ul>
               ${{ env.HISTORICAL_HTML }}
@@ -125,22 +124,22 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # Use cat to safely read the multi-line env variable
+          # Use a variable to handle the multiline text safely
           HISTORY=$(cat << 'EOF'
           ${{ env.HISTORICAL_TEXT }}
           EOF
           )
           
-          TEXT="<b>📊 Historical Backup Report</b>%0A"
+          TEXT="<b>📊 Backup Report</b>%0A"
           TEXT="${TEXT}──────────────────%0A"
           
           if [ -z "$HISTORY" ]; then
-            TEXT="${TEXT}<i>No historical files found.</i>%0A"
+            TEXT="${TEXT}<i>No files found.</i>"
           else
             TEXT="${TEXT}${HISTORY}"
           fi
           
-          TEXT="${TEXT}──────────────────%0A"
+          TEXT="${TEXT}%0A──────────────────%0A"
           TEXT="${TEXT}✅ <b>Status:</b> ${{ job.status }}"
 
           curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
