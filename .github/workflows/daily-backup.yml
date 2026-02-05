@@ -1,4 +1,4 @@
-name: 🗄️ Daily Backup (Scripted)
+name: 🗄️ Daily Backup
 
 on:
   schedule:
@@ -34,14 +34,12 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: DB_PASS
-          script_stop: true
-          connect_timeout: 5m
-          command_timeout: 15m
+          timeout: 5m            # This replaces connect_timeout
+          command_timeout: 15m   # Time for the script to run
           script: |
-            set -euo pipefail
-            # Define and create a fresh staging directory
+            set -e
             BACKUP_DIR="/tmp/db_staging"
-            rm -rf "$BACKUP_DIR" # Remove if left over from a previous crash
+            rm -rf "$BACKUP_DIR"
             mkdir -p "$BACKUP_DIR"
             
             echo "🔵 Creating compressed dump..."
@@ -57,7 +55,8 @@ jobs:
           echo "$VPS_SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
-          scp -o ConnectTimeout=300 -i ~/.ssh/id_rsa "$VPS_USER@$VPS_HOST:/tmp/db_staging/*.sql.gz" temp_backups/
+          # scp uses -T for timeout in some versions, or ConnectTimeout option
+          scp -o ConnectTimeout=300 -o BatchMode=yes -i ~/.ssh/id_rsa "$VPS_USER@$VPS_HOST:/tmp/db_staging/*.sql.gz" temp_backups/
 
       - name: 🗑️ Wipe VPS Local Folder
         uses: appleboy/ssh-action@master
@@ -65,11 +64,8 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          connect_timeout: 5m
-          script: |
-            # Deletes the entire staging directory and its contents
-            rm -rf /tmp/db_staging
-            echo "✅ Local staging directory removed."
+          timeout: 5m
+          script: rm -rf /tmp/db_staging
 
       - name: ☁️ Upload & Fetch History
         env:
