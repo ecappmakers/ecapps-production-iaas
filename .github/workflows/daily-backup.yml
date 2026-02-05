@@ -2,11 +2,15 @@ name: 🗄️ Daily Backup (Scripted)
 
 on:
   schedule:
-    - cron: '0 0 * * *'
-  workflow_dispatch:
+    - cron: '0 0 * * *'  # Midnight UTC
+  workflow_dispatch:      # Manual trigger
   push:
     branches:
       - production
+    paths:
+      - apps.json
+      - docker-compose.yml
+      - '.github/workflows/**'
 
 jobs:
   backup:
@@ -37,6 +41,7 @@ jobs:
             set -euo pipefail
             BACKUP_DIR="/tmp/db_staging"
             mkdir -p "$BACKUP_DIR"
+            # Dump all databases into a single compressed file
             docker exec main_db mysqldump -u root -p"$DB_PASS" --all-databases | gzip > "${BACKUP_DIR}/db_$(date +%F).sql.gz"
 
       - name: ⬇️ Download to Runner
@@ -49,6 +54,7 @@ jobs:
           echo "$VPS_SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+          # SCP with 5 minute connection timeout
           scp -o ConnectTimeout=300 -i ~/.ssh/id_rsa "$VPS_USER@$VPS_HOST:/tmp/db_staging/*.sql.gz" temp_backups/
 
       - name: 🗑️ Wipe VPS Local Copy
@@ -57,6 +63,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          connect_timeout: 5m
           script: rm -rf /tmp/db_staging
 
       - name: ☁️ Upload & Fetch History
@@ -64,10 +71,10 @@ jobs:
           RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
         run: |
           echo "$RCLONE_CONF" > rclone.conf
-          # Upload
+          # 1. Sync files to Google Drive
           rclone --config rclone.conf copy temp_backups gdrive:/VPS_Backups/MySQL
-          # Fetch JSON and PIPE into our Python script
-          rclone --config rclone.conf lsjson gdrive:/VPS_Backups/MySQL | python3 scripts/process_backups.py
+          # 2. Fetch JSON and process via the script in the checked-out repo
+          rclone --config rclone.conf lsjson gdrive:/VPS_Backups/MySQL | python3 "${{ github.workspace }}/scripts/process_backups.py"
 
       - name: 📧 Email Notification
         if: always()
@@ -82,8 +89,12 @@ jobs:
           to: ecappmakersonline@gmail.com,raajbala1999@gmail.com
           from: "GitHub Actions <${{ secrets.EMAIL_USER }}>"
           html_body: |
-            <h3>Backup History</h3>
-            <ul>${{ env.HISTORICAL_HTML }}</ul>
+            <h3>Backup History Report</h3>
+            <p><strong>Status:</strong> ${{ job.status }}</p>
+            <hr>
+            <ul>
+              ${{ env.HISTORICAL_HTML }}
+            </ul>
           attachments: temp_backups/*.sql.gz
 
       - name: 📱 Telegram Notification
@@ -92,10 +103,11 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # Safe URL Encoding for Telegram
+          # Safe URL Encoding for Telegram text
           HEADER="<b>📊 Backup Report</b>%0A──────────────────%0A"
           FOOTER="──────────────────%0A✅ <b>Status:</b> ${{ job.status }}"
           
+          # Using python to encode the history text to avoid shell character breakages
           python3 -c "import os, urllib.parse; print(urllib.parse.quote(os.environ.get('HISTORICAL_TEXT', '')))" > encoded.txt
           
           curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
