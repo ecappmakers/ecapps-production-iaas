@@ -8,7 +8,7 @@ on:
     paths:
       - apps.json
       - docker-compose.yml
-      - .github/workflows/**
+      - .github/workflows/production_pipeline.yml
 
 permissions:
   contents: read
