@@ -1,4 +1,4 @@
-name: 🗄️ Daily Backup (Cloud Only)
+name: 🗄️ Daily Backup (Scripted)
 
 on:
   schedule:
@@ -7,10 +7,6 @@ on:
   push:
     branches:
       - production
-    paths:
-      - apps.json
-      - docker-compose.yml
-      - .github/workflows/daily-backup.yml
 
 jobs:
   backup:
@@ -18,10 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+      - name: 📂 Checkout Repository
+        uses: actions/checkout@v4
+
       - name: 🛠️ Install Tooling
         run: |
           sudo -v ; curl https://rclone.org/install.sh | sudo bash
-          sudo apt-get install -y jq
 
       - name: 📦 SSH Database Dump
         uses: appleboy/ssh-action@master
@@ -38,10 +36,8 @@ jobs:
           script: |
             set -euo pipefail
             BACKUP_DIR="/tmp/db_staging"
-            DATE_STAMP=$(date +%F)
-            FILE_PATH="${BACKUP_DIR}/db_${DATE_STAMP}.sql.gz"
             mkdir -p "$BACKUP_DIR"
-            docker exec main_db mysqldump -u root -p"$DB_PASS" --all-databases | gzip > "$FILE_PATH"
+            docker exec main_db mysqldump -u root -p"$DB_PASS" --all-databases | gzip > "${BACKUP_DIR}/db_$(date +%F).sql.gz"
 
       - name: ⬇️ Download to Runner
         env:
@@ -61,41 +57,17 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          connect_timeout: 5m
           script: rm -rf /tmp/db_staging
 
-      - name: ☁️ Upload to Google Drive
+      - name: ☁️ Upload & Fetch History
         env:
           RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
         run: |
           echo "$RCLONE_CONF" > rclone.conf
+          # Upload
           rclone --config rclone.conf copy temp_backups gdrive:/VPS_Backups/MySQL
-
-      - name: 📑 Fetch Historical Metadata
-        shell: bash
-        env:
-          RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
-        run: |
-          echo "$RCLONE_CONF" > rclone.conf
-          rclone --config rclone.conf lsjson gdrive:/VPS_Backups/MySQL > history.json
-          
-          # SAFE WAY: Write JQ filter to a file using Quoted Heredoc
-          cat << 'EOF' > filter_html.jq
-          .[] | "<li><a href=\"https://drive.google.com/open?id=\(.ID)\">\(.Name)</a> - \((.Size/1024/1024) | printf(\"%.2f\")) MB (Uploaded: \(.ModTime | split(\"T\")[0]))</li>"
-          EOF
-
-          cat << 'EOF' > filter_text.jq
-          .[] | "📄 <a href=\"https://drive.google.com/open?id=\(.ID)\">\(.Name)</a>\n📅 \(.ModTime | split(\"T\")[0])\n⚖️ \((.Size/1024/1024) | printf(\"%.2f\")) MB\n"
-          EOF
-
-          # Process and append to environment
-          echo "HISTORICAL_HTML<<HTML_BLOCK" >> "$GITHUB_ENV"
-          jq -r -f filter_html.jq history.json >> "$GITHUB_ENV"
-          echo "HTML_BLOCK" >> "$GITHUB_ENV"
-
-          echo "HISTORICAL_TEXT<<TEXT_BLOCK" >> "$GITHUB_ENV"
-          jq -r -f filter_text.jq history.json >> "$GITHUB_ENV"
-          echo "TEXT_BLOCK" >> "$GITHUB_ENV"
+          # Fetch JSON and PIPE into our Python script
+          rclone --config rclone.conf lsjson gdrive:/VPS_Backups/MySQL | python3 scripts/process_backups.py
 
       - name: 📧 Email Notification
         if: always()
@@ -110,12 +82,8 @@ jobs:
           to: ecappmakersonline@gmail.com,raajbala1999@gmail.com
           from: "GitHub Actions <${{ secrets.EMAIL_USER }}>"
           html_body: |
-            <h3>Google Drive Backup History</h3>
-            <p>Status: <b>${{ job.status }}</b></p>
-            <hr>
-            <ul>
-              ${{ env.HISTORICAL_HTML }}
-            </ul>
+            <h3>Backup History</h3>
+            <ul>${{ env.HISTORICAL_HTML }}</ul>
           attachments: temp_backups/*.sql.gz
 
       - name: 📱 Telegram Notification
@@ -124,26 +92,14 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # Use a variable to handle the multiline text safely
-          HISTORY=$(cat << 'EOF'
-          ${{ env.HISTORICAL_TEXT }}
-          EOF
-          )
+          # Safe URL Encoding for Telegram
+          HEADER="<b>📊 Backup Report</b>%0A──────────────────%0A"
+          FOOTER="──────────────────%0A✅ <b>Status:</b> ${{ job.status }}"
           
-          TEXT="<b>📊 Backup Report</b>%0A"
-          TEXT="${TEXT}──────────────────%0A"
+          python3 -c "import os, urllib.parse; print(urllib.parse.quote(os.environ.get('HISTORICAL_TEXT', '')))" > encoded.txt
           
-          if [ -z "$HISTORY" ]; then
-            TEXT="${TEXT}<i>No files found.</i>"
-          else
-            TEXT="${TEXT}${HISTORY}"
-          fi
-          
-          TEXT="${TEXT}%0A──────────────────%0A"
-          TEXT="${TEXT}✅ <b>Status:</b> ${{ job.status }}"
-
           curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
             -d chat_id="$CHAT_ID" \
             -d parse_mode="HTML" \
-            -d text="$TEXT" \
+            -d text="${HEADER}$(cat encoded.txt)${FOOTER}" \
             -d disable_web_page_preview="true"
