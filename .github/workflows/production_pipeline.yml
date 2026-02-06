@@ -497,21 +497,29 @@ jobs:
 
       - name: � Setup Database Users
         uses: appleboy/ssh-action@master
-
+        env:
+          DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          envs: DB_ROOT_PASSWORD
           script: |
             BASE="/opt/ecapps-hosting"
             DB_HOST="localhost"
             DB_ROOT_USER="root"
-            DB_ROOT_PASS="${{ secrets.DB_ROOT_PASSWORD }}"
+            DB_ROOT_PASS="$DB_ROOT_PASSWORD"
             
             echo "Setting up database users and permissions..."
             
-            # All environment variables (including secrets) are automatically available
-            # to the Python script as the child process inherits them
+            # Export variables for Python subprocess
+            export BASE
+            export DB_HOST
+            export DB_ROOT_USER
+            export DB_ROOT_PASS
+            
+            # The Python script will discover secrets from db-config.json files
+            # GitHub Actions automatically provides all secrets to the environment
             python3 "$BASE/.github/scripts/setup_db_users.py"
 
       - name: �🔄 Apply Schema Migrations
