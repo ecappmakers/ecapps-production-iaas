@@ -161,6 +161,32 @@ jobs:
           
           echo "⚡ ${{ matrix.name }} (Static)" >> ../built_static.txt
 
+      - name: 📋 Verify Artifact Contents
+        run: |
+          echo "==== 📋 ARTIFACT CONTENTS FOR: ${{ matrix.name }} ===="
+          echo ""
+          echo "Output directory structure:"
+          ls -lah output/
+          echo ""
+          echo "Checking for .htaccess:"
+          if [ -f "output/.htaccess" ]; then
+            echo "  ✅ Found .htaccess"
+            wc -l output/.htaccess
+          else
+            echo "  ❌ .htaccess NOT found"
+          fi
+          echo ""
+          echo "Checking for .htpasswd:"
+          if [ -f "output/.htpasswd" ]; then
+            echo "  ✅ Found .htpasswd"
+            wc -l output/.htpasswd
+          else
+            echo "  ❌ .htpasswd NOT found"
+          fi
+          echo ""
+          echo "Total files in output:"
+          find output -type f | wc -l
+
       - uses: actions/upload-artifact@v4
         with:
           name: static-site-${{ matrix.name }}
@@ -454,6 +480,9 @@ jobs:
           script: |
             BASE="/opt/ecapps-hosting"
             
+            echo "==================== 📦 STARTING SYNC OPERATIONS ===================="
+            echo ""
+            
             # Sync Database Schemas
             if [ -d "$BASE/temp_schemas/temp_database" ]; then
                 echo "🗄️ Syncing database schemas..."
@@ -494,7 +523,10 @@ jobs:
             
             # Sync Static Sites
             if [ -d "$BASE/temp_uploads/temp_static" ]; then
+                echo ""
                 echo "📦 Syncing static artifacts..."
+                echo ""
+                
                 for dir in $BASE/temp_uploads/temp_static/*/; do
                    [ -d "$dir" ] || continue
                    SITE_NAME=$(basename "$dir" | sed 's/static-site-//')
@@ -503,6 +535,38 @@ jobs:
                    if [ "$DOMAIN" != "null" ]; then
                       SITE_DIR="$BASE/data/sites/$DOMAIN"
                       mkdir -p "$SITE_DIR"
+                      
+                      echo "════════════════════════════════════════════════════════════════"
+                      echo "🌐 Processing: $SITE_NAME ($DOMAIN)"
+                      echo "════════════════════════════════════════════════════════════════"
+                      echo ""
+                      echo "📍 Source directory: $dir"
+                      echo "📍 Target directory: $SITE_DIR"
+                      echo ""
+                      
+                      # Pre-sync check
+                      echo "[PRE-SYNC CHECK]"
+                      echo "📋 Files in source artifact:"
+                      ls -lah "$dir" | head -20
+                      echo ""
+                      
+                      echo "📋 Checking for special files in source:"
+                      if [ -f "$dir/.htaccess" ]; then
+                        echo "  ✅ .htaccess found in source"
+                        echo "     Size: $(stat -f%z "$dir/.htaccess" 2>/dev/null || stat -c%s "$dir/.htaccess")"
+                        echo "     Content preview:"
+                        head -3 "$dir/.htaccess" | sed 's/^/       /'
+                      else
+                        echo "  ❌ .htaccess NOT in source"
+                      fi
+                      
+                      if [ -f "$dir/.htpasswd" ]; then
+                        echo "  ✅ .htpasswd found in source"
+                        echo "     Size: $(stat -f%z "$dir/.htpasswd" 2>/dev/null || stat -c%s "$dir/.htpasswd")"
+                      else
+                        echo "  ❌ .htpasswd NOT in source"
+                      fi
+                      echo ""
                       
                       # Backup existing .htaccess and .htpasswd if present
                       if [ -f "$SITE_DIR/.htaccess" ]; then
@@ -513,36 +577,84 @@ jobs:
                         cp "$SITE_DIR/.htpasswd" "$SITE_DIR/.htpasswd.backup"
                         echo "  📋 Backed up existing .htpasswd"
                       fi
+                      echo ""
                       
                       # Sync all files except .htaccess and .htpasswd
+                      echo "[SYNCING FILES]"
+                      echo "Running rsync with --delete..."
                       rsync -av --delete --exclude='.htaccess' --exclude='.htpasswd' "$dir" "$SITE_DIR/"
+                      RSYNC_EXIT=$?
+                      echo "Rsync exit code: $RSYNC_EXIT"
+                      echo ""
                       
                       # Handle .htaccess: copy from source if exists, otherwise restore backup
+                      echo "[HANDLING .htaccess]"
                       if [ -f "$dir/.htaccess" ]; then
                         cp "$dir/.htaccess" "$SITE_DIR/.htaccess"
-                        echo "  ✅ Copied new .htaccess for $DOMAIN"
+                        echo "  ✅ Copied new .htaccess from source"
                       elif [ -f "$SITE_DIR/.htaccess.backup" ]; then
                         mv "$SITE_DIR/.htaccess.backup" "$SITE_DIR/.htaccess"
-                        echo "  ↩️ Restored existing .htaccess for $DOMAIN"
+                        echo "  ↩️ Restored existing .htaccess from backup"
+                      else
+                        echo "  ⚠️ No .htaccess found (source or backup)"
                       fi
+                      echo ""
                       
                       # Handle .htpasswd: copy from source if exists, otherwise restore backup
+                      echo "[HANDLING .htpasswd]"
                       if [ -f "$dir/.htpasswd" ]; then
                         cp "$dir/.htpasswd" "$SITE_DIR/.htpasswd"
-                        echo "  ✅ Copied new .htpasswd for $DOMAIN"
+                        echo "  ✅ Copied new .htpasswd from source"
                       elif [ -f "$SITE_DIR/.htpasswd.backup" ]; then
                         mv "$SITE_DIR/.htpasswd.backup" "$SITE_DIR/.htpasswd"
-                        echo "  ↩️ Restored existing .htpasswd for $DOMAIN"
+                        echo "  ↩️ Restored existing .htpasswd from backup"
+                      else
+                        echo "  ⚠️ No .htpasswd found (source or backup)"
                       fi
+                      echo ""
                       
                       # Clean up unused backups
                       rm -f "$SITE_DIR/.htaccess.backup" "$SITE_DIR/.htpasswd.backup"
+                      
+                      # Final verification
+                      echo "[POST-SYNC VERIFICATION]"
+                      echo "Files now in $SITE_DIR:"
+                      ls -lah "$SITE_DIR" | head -20
+                      echo ""
+                      
+                      echo "Special files status:"
+                      if [ -f "$SITE_DIR/.htaccess" ]; then
+                        echo "  ✅ .htaccess: PRESENT"
+                        echo "     Size: $(stat -f%z "$SITE_DIR/.htaccess" 2>/dev/null || stat -c%s "$SITE_DIR/.htaccess")"
+                      else
+                        echo "  ❌ .htaccess: MISSING"
+                      fi
+                      
+                      if [ -f "$SITE_DIR/.htpasswd" ]; then
+                        echo "  ✅ .htpasswd: PRESENT"
+                        echo "     Size: $(stat -f%z "$SITE_DIR/.htpasswd" 2>/dev/null || stat -c%s "$SITE_DIR/.htpasswd")"
+                      else
+                        echo "  ❌ .htpasswd: MISSING"
+                      fi
+                      echo ""
                    fi
                 done
+                
+                echo "════════════════════════════════════════════════════════════════"
+                echo "🧹 Cleaning up temp files..."
                 rm -rf $BASE/temp_uploads
+                
                 # Reload Web Server
+                echo "🔄 Restarting shared_web container..."
                 cd $BASE && docker compose -f docker-compose.yml -f docker-compose.prod.yml restart shared_web
+                echo "✅ Container restarted"
+                echo ""
+            else
+                echo "⚠️ No static site artifacts found to sync"
             fi
+            
+            echo "==================== ✅ SYNC OPERATIONS COMPLETE ===================="
+            echo ""
 
 
       - name: 👤 Setup Database Users
