@@ -148,6 +148,17 @@ jobs:
 
           # Safe copy using dot syntax
           cp -r "${{ matrix.output_dir }}"/. ../output/
+          
+          # Include .htaccess and .htpasswd from repo root if they exist
+          if [ -f ".htaccess" ]; then
+            echo "📋 Including .htaccess from repo root"
+            cp ".htaccess" ../output/.htaccess
+          fi
+          if [ -f ".htpasswd" ]; then
+            echo "📋 Including .htpasswd from repo root"
+            cp ".htpasswd" ../output/.htpasswd
+          fi
+          
           echo "⚡ ${{ matrix.name }} (Static)" >> ../built_static.txt
 
       - uses: actions/upload-artifact@v4
