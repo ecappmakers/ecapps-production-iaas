@@ -493,16 +493,20 @@ jobs:
                       SITE_DIR="$BASE/data/sites/$DOMAIN"
                       mkdir -p "$SITE_DIR"
                       
-                      # Backup existing .htaccess if present
+                      # Backup existing .htaccess and .htpasswd if present
                       if [ -f "$SITE_DIR/.htaccess" ]; then
                         cp "$SITE_DIR/.htaccess" "$SITE_DIR/.htaccess.backup"
                         echo "  📋 Backed up existing .htaccess"
                       fi
+                      if [ -f "$SITE_DIR/.htpasswd" ]; then
+                        cp "$SITE_DIR/.htpasswd" "$SITE_DIR/.htpasswd.backup"
+                        echo "  📋 Backed up existing .htpasswd"
+                      fi
                       
-                      # Sync all files except .htaccess
-                      rsync -av --delete --exclude='.htaccess' "$dir" "$SITE_DIR/"
+                      # Sync all files except .htaccess and .htpasswd
+                      rsync -av --delete --exclude='.htaccess' --exclude='.htpasswd' "$dir" "$SITE_DIR/"
                       
-                      # Copy .htaccess from source if it exists, otherwise restore backup
+                      # Handle .htaccess: copy from source if exists, otherwise restore backup
                       if [ -f "$dir/.htaccess" ]; then
                         cp "$dir/.htaccess" "$SITE_DIR/.htaccess"
                         echo "  ✅ Copied new .htaccess for $DOMAIN"
@@ -510,6 +514,18 @@ jobs:
                         mv "$SITE_DIR/.htaccess.backup" "$SITE_DIR/.htaccess"
                         echo "  ↩️ Restored existing .htaccess for $DOMAIN"
                       fi
+                      
+                      # Handle .htpasswd: copy from source if exists, otherwise restore backup
+                      if [ -f "$dir/.htpasswd" ]; then
+                        cp "$dir/.htpasswd" "$SITE_DIR/.htpasswd"
+                        echo "  ✅ Copied new .htpasswd for $DOMAIN"
+                      elif [ -f "$SITE_DIR/.htpasswd.backup" ]; then
+                        mv "$SITE_DIR/.htpasswd.backup" "$SITE_DIR/.htpasswd"
+                        echo "  ↩️ Restored existing .htpasswd for $DOMAIN"
+                      fi
+                      
+                      # Clean up unused backups
+                      rm -f "$SITE_DIR/.htaccess.backup" "$SITE_DIR/.htpasswd.backup"
                    fi
                 done
                 rm -rf $BASE/temp_uploads
