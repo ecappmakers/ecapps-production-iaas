@@ -495,7 +495,37 @@ jobs:
                 cd $BASE && docker compose -f docker-compose.yml -f docker-compose.prod.yml restart shared_web
             fi
 
-      - name: 🔄 Apply Schema Migrations
+      - name: � Setup Database Users
+        uses: appleboy/ssh-action@master
+
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            BASE="/opt/ecapps-hosting"
+            DB_HOST="localhost"
+            DB_ROOT_USER="root"
+            DB_ROOT_PASS="${{ secrets.DB_ROOT_PASSWORD }}"
+            
+            echo "Setting up database users and permissions..."
+            
+            # Secrets are automatically available in shell from GitHub Actions context
+            # Export them for the Python script to access
+            export BASE="$BASE"
+            export DB_HOST="$DB_HOST"
+            export DB_ROOT_USER="$DB_ROOT_USER"
+            export DB_ROOT_PASS="$DB_ROOT_PASS"
+            
+            # Pass all DB_* secrets from GitHub Actions context to Python
+            # The script will discover what it needs from db-config.json files
+            env | grep '^DB_' | while IFS='=' read -r key value; do
+              export "$key"="$value"
+            done
+            
+            python3 "$BASE/.github/scripts/setup_db_users.py"
+
+      - name: �🔄 Apply Schema Migrations
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.VPS_HOST }}
