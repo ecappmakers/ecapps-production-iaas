@@ -238,7 +238,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          source: docker-compose.yml,apps.json,.github/scripts/
+          source: docker-compose.yml,Dockerfile.php,apps.json,.github/scripts/
           target: /opt/ecapps-hosting/
 
       - name: � Install Python & Dependencies
@@ -314,14 +314,16 @@ jobs:
             version: "3.8"
             services:
               shared_web:
-                image: php:8.1-apache
+                build:
+                  context: .
+                  dockerfile: Dockerfile.php
+                image: shared_web:latest
                 container_name: shared_web
                 restart: always
                 volumes:
                   - "./data/sites:/var/www/html"
                   - "./data/apache/vhosts.conf:/etc/apache2/sites-enabled/000-default.conf"
                 networks: [hosting_net]
-                command: /bin/sh -c "docker-php-ext-install mysqli && a2enmod headers rewrite && apache2-foreground"
 
 
               db:
