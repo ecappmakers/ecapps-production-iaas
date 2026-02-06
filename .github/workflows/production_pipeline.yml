@@ -527,6 +527,7 @@ jobs:
             echo ""
             
             export BASE DB_HOST DB_ROOT_USER DB_ROOT_PASS
+            export $(env | grep '_PASSWORD=' | cut -d= -f1 | tr '\n' ' ')
             
             echo "[DEBUG] Environment Variables:"
             echo "  - BASE: $BASE"
@@ -551,13 +552,12 @@ jobs:
             
             # Show which secrets are available in environment
             echo "[STEP 2] Verifying secrets are available in environment..."
-            AVAILABLE_COUNT=0
-            echo "  Looking for secrets matching pattern: ALADEESWARAN_* and DB_*"
-            env | grep -E "^(ALADEESWARAN_|DB_)" | cut -d= -f1 | while read -r secret; do
+            AVAILABLE_COUNT=$(env | grep '_PASSWORD=' | wc -l)
+            echo "  Looking for secrets with _PASSWORD suffix"
+            env | grep '_PASSWORD=' | cut -d= -f1 | sort | while read -r secret; do
               echo "    ✓ Found: $secret"
-              ((AVAILABLE_COUNT++))
             done
-            echo "  Total available: $(env | grep -E '^(ALADEESWARAN_|DB_)' | wc -l)"
+            echo "  Total available: $AVAILABLE_COUNT"
             echo ""
             
             # Validate Python script exists
