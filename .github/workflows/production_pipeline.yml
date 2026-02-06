@@ -490,8 +490,26 @@ jobs:
                    DOMAIN=$(jq -r ".apps[] | select(.name==\"$SITE_NAME\") | .domain" $BASE/apps.json)
                    
                    if [ "$DOMAIN" != "null" ]; then
-                      mkdir -p "$BASE/data/sites/$DOMAIN"
-                      rsync -av --delete "$dir" "$BASE/data/sites/$DOMAIN/"
+                      SITE_DIR="$BASE/data/sites/$DOMAIN"
+                      mkdir -p "$SITE_DIR"
+                      
+                      # Backup existing .htaccess if present
+                      if [ -f "$SITE_DIR/.htaccess" ]; then
+                        cp "$SITE_DIR/.htaccess" "$SITE_DIR/.htaccess.backup"
+                        echo "  📋 Backed up existing .htaccess"
+                      fi
+                      
+                      # Sync all files except .htaccess
+                      rsync -av --delete --exclude='.htaccess' "$dir" "$SITE_DIR/"
+                      
+                      # Copy .htaccess from source if it exists, otherwise restore backup
+                      if [ -f "$dir/.htaccess" ]; then
+                        cp "$dir/.htaccess" "$SITE_DIR/.htaccess"
+                        echo "  ✅ Copied new .htaccess for $DOMAIN"
+                      elif [ -f "$SITE_DIR/.htaccess.backup" ]; then
+                        mv "$SITE_DIR/.htaccess.backup" "$SITE_DIR/.htaccess"
+                        echo "  ↩️ Restored existing .htaccess for $DOMAIN"
+                      fi
                    fi
                 done
                 rm -rf $BASE/temp_uploads
