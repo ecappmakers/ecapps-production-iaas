@@ -10,7 +10,7 @@ on:
     paths:
       - apps.json
       - docker-compose.yml
-      - '.github/workflows/**'
+      - '.github/workflows/daily-backup.yml'
 
 jobs:
   backup:
