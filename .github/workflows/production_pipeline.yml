@@ -149,48 +149,100 @@ jobs:
           # Safe copy using dot syntax
           cp -r "${{ matrix.output_dir }}"/. ../output/
           
+          # Check current directory and list repo root files
+          echo ""
+          echo "[DEBUG] Current working directory: $(pwd)"
+          echo "[DEBUG] Files in current directory:"
+          ls -lah | head -20
+          echo ""
+          
           # Include .htaccess and .htpasswd from repo root if they exist
+          echo "[COPYING SPECIAL FILES]"
           if [ -f ".htaccess" ]; then
-            echo "📋 Including .htaccess from repo root"
-            cp ".htaccess" ../output/.htaccess
-          fi
-          if [ -f ".htpasswd" ]; then
-            echo "📋 Including .htpasswd from repo root"
-            cp ".htpasswd" ../output/.htpasswd
+            echo "  ✅ Found .htaccess in repo root"
+            echo "     Location: $(pwd)/.htaccess"
+            echo "     Size: $(stat -c%s .htaccess)"
+            echo "     Copying to ../output/.htaccess..."
+            cp -v ".htaccess" "../output/.htaccess"
+            HTACCESS_COPY=$?
+            if [ $HTACCESS_COPY -eq 0 ]; then
+              echo "     ✅ Copy successful"
+            else
+              echo "     ❌ Copy failed with exit code: $HTACCESS_COPY"
+            fi
+          else
+            echo "  ❌ .htaccess NOT found in repo root"
+            echo "     Expected at: $(pwd)/.htaccess"
           fi
           
+          echo ""
+          
+          if [ -f ".htpasswd" ]; then
+            echo "  ✅ Found .htpasswd in repo root"
+            echo "     Location: $(pwd)/.htpasswd"
+            echo "     Size: $(stat -c%s .htpasswd)"
+            echo "     Copying to ../output/.htpasswd..."
+            cp -v ".htpasswd" "../output/.htpasswd"
+            HTPASSWD_COPY=$?
+            if [ $HTPASSWD_COPY -eq 0 ]; then
+              echo "     ✅ Copy successful"
+            else
+              echo "     ❌ Copy failed with exit code: $HTPASSWD_COPY"
+            fi
+          else
+            echo "  ❌ .htpasswd NOT found in repo root"
+            echo "     Expected at: $(pwd)/.htpasswd"
+          fi
+          
+          echo ""
           echo "⚡ ${{ matrix.name }} (Static)" >> ../built_static.txt
 
       - name: 📋 Verify Artifact Contents
         run: |
           echo "==== 📋 ARTIFACT CONTENTS FOR: ${{ matrix.name }} ===="
           echo ""
-          echo "Output directory structure:"
-          ls -lah output/
+          echo "Output directory structure (full listing):"
+          ls -lah output/ || echo "Directory doesn't exist!"
           echo ""
+          echo "Total files in output directory:"
+          find output -type f -exec ls -lh {} \; | wc -l
+          echo ""
+          
           echo "Checking for .htaccess:"
           if [ -f "output/.htaccess" ]; then
-            echo "  ✅ Found .htaccess"
-            wc -l output/.htaccess
+            echo "  ✅ Found output/.htaccess"
+            echo "     Size: $(stat -c%s output/.htaccess) bytes"
+            echo "     Permissions: $(stat -c%A output/.htaccess)"
+            echo "     Content preview:"
+            head -5 output/.htaccess | sed 's/^/       /'
           else
-            echo "  ❌ .htaccess NOT found"
+            echo "  ❌ output/.htaccess NOT found"
+            echo "     Searched: $(pwd)/output/.htaccess"
           fi
           echo ""
+          
           echo "Checking for .htpasswd:"
           if [ -f "output/.htpasswd" ]; then
-            echo "  ✅ Found .htpasswd"
-            wc -l output/.htpasswd
+            echo "  ✅ Found output/.htpasswd"
+            echo "     Size: $(stat -c%s output/.htpasswd) bytes"
+            echo "     Permissions: $(stat -c%A output/.htpasswd)"
           else
-            echo "  ❌ .htpasswd NOT found"
+            echo "  ❌ output/.htpasswd NOT found"
+            echo "     Searched: $(pwd)/output/.htpasswd"
           fi
           echo ""
+          
           echo "Total files in output:"
           find output -type f | wc -l
+          echo ""
+          echo "All files in output (recursive):"
+          find output -type f -printf '%p (%s bytes)\n' | sort
 
       - uses: actions/upload-artifact@v4
         with:
           name: static-site-${{ matrix.name }}
           path: output
+          include-hidden-files: true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -524,6 +576,20 @@ jobs:
             # Sync Static Sites
             if [ -d "$BASE/temp_uploads/temp_static" ]; then
                 echo ""
+                echo "[ARTIFACT CONTENTS CHECK]"
+                echo "Found temp_static directory structure:"
+                find "$BASE/temp_uploads/temp_static" -type f -printf '%p (%s bytes)\n' | head -30
+                echo ""
+                echo "Looking for .htaccess and .htpasswd in artifacts:"
+                find "$BASE/temp_uploads/temp_static" -name ".htaccess" -o -name ".htpasswd" | while read file; do
+                  echo "  ✅ Found: $file ($(stat -c%s "$file") bytes)"
+                done
+                HTFILE_COUNT=$(find "$BASE/temp_uploads/temp_static" -name ".htaccess" -o -name ".htpasswd" | wc -l)
+                if [ $HTFILE_COUNT -eq 0 ]; then
+                  echo "  ❌ No .htaccess or .htpasswd files found in artifacts"
+                fi
+                echo ""
+                
                 echo "📦 Syncing static artifacts..."
                 echo ""
                 
