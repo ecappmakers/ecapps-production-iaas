@@ -358,8 +358,14 @@ jobs:
                 | sed "s/DB_ROOT_PASSWORD/$DB_PASS/" >> docker-compose.prod.yml
             done
 
-            # 4. Apply Changes
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+            # 4. Build local images and pull remote images
+            echo "🔨 Building shared_web from Dockerfile..."
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml build shared_web
+            
+            echo "📥 Pulling remote images..."
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull --ignore-buildable
+            
+            echo "🚀 Starting services..."
             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
 
