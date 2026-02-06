@@ -502,12 +502,13 @@ jobs:
       - name: � Setup Database Users
         uses: appleboy/ssh-action@master
         env:
+          GH_PAT: ${{ secrets.GH_PAT }}
           DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: DB_ROOT_PASSWORD
+          envs: GH_PAT,DB_ROOT_PASSWORD
           script: |
             BASE="/opt/ecapps-hosting"
             DB_HOST="localhost"
@@ -516,15 +517,37 @@ jobs:
             
             echo "Setting up database users and permissions..."
             
-            # Export variables for Python subprocess
-            export BASE
-            export DB_HOST
-            export DB_ROOT_USER
-            export DB_ROOT_PASS
+            export BASE DB_HOST DB_ROOT_USER DB_ROOT_PASS
             
-            # The Python script will discover secrets from db-config.json files
-            # GitHub Actions automatically provides all secrets to the environment
-            python3 "$BASE/.github/scripts/setup_db_users.py"
+            # Extract all secret names from db-config.json files
+            SECRETS_JSON=$(find "$BASE/data/schemas" -name "db-config.json" -exec jq -r '.secret_name' {} \; 2>/dev/null | jq -R . | jq -s . 2>/dev/null || echo '[]')
+            
+            echo "📋 Secrets array from db-config.json: $SECRETS_JSON"
+            
+            # Dynamically fetch secret values using GitHub API with GH_PAT
+            echo "🔐 Fetching secrets from GitHub API..."
+            
+            REPO="ecappmakers/ecapps-production-iaas"
+            
+            # Fetch each secret from GitHub and export as env var
+            echo "$SECRETS_JSON" | jq -r '.[]' | while read -r secret_name; do
+              if [ -n "$secret_name" ] && [ "$secret_name" != "null" ]; then
+                # Use GitHub API to get secret value (requires GH_PAT with repo scope)
+                SECRET_VALUE=$(curl -s -H "Authorization: token $GH_PAT" \
+                  -H "Accept: application/vnd.github.v3+json" \
+                  "https://api.github.com/repos/$REPO/actions/variables/$secret_name" 2>/dev/null | jq -r '.value // empty')
+                
+                if [ -z "$SECRET_VALUE" ]; then
+                  echo "   ⚠️ Secret '$secret_name' not found in GitHub"
+                else
+                  echo "   ✓ $secret_name fetched"
+                  export "$secret_name"="$SECRET_VALUE"
+                fi
+              fi
+            done
+            
+            # Pass secrets array as JSON argument to Python script
+            python3 "$BASE/.github/scripts/setup_db_users.py" "$SECRETS_JSON"
 
       - name: �🔄 Apply Schema Migrations
         uses: appleboy/ssh-action@master
