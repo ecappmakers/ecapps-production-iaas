@@ -463,6 +463,10 @@ jobs:
                       SCHEMA_DIR="$BASE/data/schemas/$DB_NAME"
                       mkdir -p "$SCHEMA_DIR"
                       
+                      # Copy db-config.json
+                      cp "$CONFIG_FILE" "$SCHEMA_DIR/" 2>/dev/null || true
+                      echo "✅ Config copied: $SCHEMA_DIR/db-config.json"
+                      
                       # Copy schema files
                       if [ -d "$dir/schema" ]; then
                         cp -r "$dir/schema"/* "$SCHEMA_DIR/" 2>/dev/null || true
