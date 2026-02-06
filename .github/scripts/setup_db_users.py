@@ -23,11 +23,26 @@ def setup_db_users():
     schemas_dir = os.path.join(base_dir, 'data', 'schemas')
     
     print("👤 Setting up database users...\n")
+    print(f"   📁 Looking for schemas in: {schemas_dir}")
     
     # Check if schemas directory exists
     if not os.path.isdir(schemas_dir):
-        print("ℹ️ No schema files found")
+        print(f"   ⚠️ Schemas directory does not exist: {schemas_dir}")
+        print("   ℹ️ This is OK if no databases have been synced yet")
         return 0
+    
+    # List what's in the schemas directory for debugging
+    try:
+        items = os.listdir(schemas_dir)
+        print(f"   📋 Found {len(items)} item(s) in schemas directory")
+        for item in items:
+            item_path = os.path.join(schemas_dir, item)
+            if os.path.isdir(item_path):
+                print(f"      📁 {item}/")
+            else:
+                print(f"      📄 {item}")
+    except Exception as e:
+        print(f"   ⚠️ Could not list schemas directory: {e}")
     
     try:
         # Connect to MySQL as root
@@ -54,7 +69,12 @@ def setup_db_users():
         config_file = os.path.join(db_path, 'db-config.json')
         
         # Skip if not a directory or no config file
-        if not os.path.isdir(db_path) or not os.path.isfile(config_file):
+        if not os.path.isdir(db_path):
+            print(f"   ⏭️  Skipping (not a directory): {db_dir}")
+            continue
+            
+        if not os.path.isfile(config_file):
+            print(f"   ⏭️  No db-config.json in {db_dir}/")
             continue
         
         # Read config
@@ -63,24 +83,35 @@ def setup_db_users():
                 config = json.load(f)
         except Exception as e:
             print(f"   ⚠️ Could not read config for {db_dir}: {e}")
+            users_skipped += 1
             continue
         
         db_name = config.get('database_name')
         db_user_name = config.get('database_user')
         secret_name = config.get('secret_name')
         
+        print(f"   📋 Found config: {db_dir}")
+        print(f"      - Database: {db_name}")
+        print(f"      - User: {db_user_name}")
+        print(f"      - Secret: {secret_name}")
+        
         if not db_name or not db_user_name or not secret_name:
             print(f"   ⚠️ Incomplete config for {db_dir} - missing database_name, database_user, or secret_name")
+            users_skipped += 1
             continue
         
         # Get password from environment variable using secret_name
         db_user_pass = os.environ.get(secret_name)
         
         if not db_user_pass:
-            print(f"   ⚠️ Secret '{secret_name}' not found in environment for {db_dir}")
+            print(f"      ❌ Secret '{secret_name}' not found in environment")
+            # Show available secrets for debugging
+            print(f"      📝 Available secrets: {', '.join([k for k in os.environ.keys() if k.startswith('DB_')])}")
             missing_secrets.append(secret_name)
             users_skipped += 1
             continue
+        
+        print(f"      ✅ Secret found: {secret_name}")
         
         print(f"   📋 Processing: {db_name}")
         
