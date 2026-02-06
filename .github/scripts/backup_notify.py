@@ -38,7 +38,8 @@ def send_telegram_notification():
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')
 
     # 3. Construct the "Exaggerated" HTML Message
-    # We use <pre> for the history to ensure monospaced alignment on mobile
+    # Removed <pre> tags around history to allow Telegram to render clickable links.
+    # Note: Telegram disables link interaction inside <pre> and <code> blocks.
     message_html = (
         f"<b>{status_icon} {header_text}</b>\n"
         f"─────────────────────────────\n"
@@ -48,7 +49,7 @@ def send_telegram_notification():
         f"<b>🕒 EXECUTION TIMESTAMP:</b> {current_time}\n"
         f"─────────────────────────────\n"
         f"<b>📜 ARCHIVAL MANIFEST (LAST 5):</b>\n"
-        f"<pre>{history}</pre>\n"
+        f"{history}\n"
         f"─────────────────────────────\n"
         f"<i>🤖 Automated Security Protocol via GitHub Actions</i>"
     )
