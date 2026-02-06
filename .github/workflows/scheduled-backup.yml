@@ -1,0 +1,200 @@
+name: 🗄️ Scheduled Backup (Every 3h)
+
+on:
+  schedule:
+    # Runs at minute 0 past every 3rd hour (00:00, 03:00, 06:00, etc.)
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - production
+    paths:
+      - apps.json
+      - docker-compose.yml
+      - '.github/workflows/scheduled-backup.yml'
+
+jobs:
+  backup:
+    name: 🛡️ Secure Database Backup
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📂 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🛠️ Install Tooling
+        run: |
+          echo "🔧 Installing Rclone..."
+          sudo -v
+          curl https://rclone.org/install.sh | sudo bash
+          echo "✅ Rclone installed successfully."
+
+      - name: 📦 SSH Database Dump (User DBs Only)
+        uses: appleboy/ssh-action@master
+        env:
+          DB_PASS: ${{ secrets.DB_ROOT_PASSWORD }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: DB_PASS
+          timeout: 5m
+          command_timeout: 15m
+          script: |
+            set -e
+            echo "🔵 Starting Remote Backup Sequence..."
+            
+            # Define backup directory
+            BACKUP_DIR="/tmp/db_staging"
+            echo "📂 Cleaning staging area: $BACKUP_DIR"
+            rm -rf "$BACKUP_DIR"
+            mkdir -p "$BACKUP_DIR"
+            
+            # Generate Filename with Time (Hour-Minute)
+            FILENAME="db_$(date +%F_%H-%M).sql"
+            echo "🏷️  Target Filename: $FILENAME"
+            
+            echo "🔍 Scanning for User Databases..."
+            # 1. List all DBs (-N removes headers)
+            # 2. Grep excludes system databases (information_schema, etc.)
+            # 3. tr replaces newlines with spaces to form a list for mysqldump
+            USER_DBS=$(docker exec main_db mysql -u root -p"$DB_PASS" -N -e "SHOW DATABASES;" | grep -Ev "^(information_schema|performance_schema|mysql|sys)$" | tr '\n' ' ')
+            
+            if [ -z "$USER_DBS" ]; then
+              echo "⚠️  CRITICAL: No user databases found to backup!"
+              exit 0
+            fi
+
+            echo "✅ Targets Identified: $USER_DBS"
+            
+            echo "💾 Executing MySQL Dump (Uncompressed)..."
+            # We use --databases so 'CREATE DATABASE' statements are included
+            docker exec main_db mysqldump -u root -p"$DB_PASS" --databases $USER_DBS > "${BACKUP_DIR}/${FILENAME}"
+            
+            echo "✨ Dump Completed Successfully."
+
+      - name: ⬇️ Download to Runner
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          echo "🔌 Establishing Secure Connection for Transfer..."
+          mkdir -p ~/.ssh temp_backups
+          echo "$VPS_SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+          
+          echo "📥 Downloading artifacts..."
+          # Note: Looking for .sql files now, not .gz
+          scp -o ConnectTimeout=300 -o BatchMode=yes -i ~/.ssh/id_rsa "$VPS_USER@$VPS_HOST:/tmp/db_staging/*.sql" temp_backups/
+          
+          # Capture backup size for notifications
+          SIZE=$(du -sh temp_backups | awk '{print $1}')
+          echo "📏 Artifact Size: $SIZE"
+          echo "BACKUP_SIZE=$SIZE" >> $GITHUB_ENV
+
+      - name: 🗑️ Wipe VPS Local Folder
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          timeout: 5m
+          script: |
+             echo "🧹 Cleaning up remote staging area..."
+             rm -rf /tmp/db_staging
+             echo "✨ Remote cleanup complete."
+
+      - name: ☁️ Upload & Fetch History
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          echo "☁️  Initializing Cloud Uplink..."
+          echo "$RCLONE_CONF" > rclone.conf
+          
+          echo "📤 Uploading to Google Drive..."
+          rclone --config rclone.conf copy temp_backups gdrive:/VPS_Backups/MySQL
+          
+          echo "📜 Retrieving Historical Logs..."
+          # This step generates HISTORICAL_HTML and HISTORICAL_TEXT env vars for notifications
+          rclone --config rclone.conf lsjson gdrive:/VPS_Backups/MySQL | python3 "${{ github.workspace }}/.github/scripts/process_backups.py"
+
+      - name: 📧 Email Notification
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.EMAIL_USER }}
+          password: ${{ secrets.EMAIL_PASS }}
+          subject: "🛡️ MISSION REPORT: Database Secured [$(date +%H:%M)]"
+          to: ecappmakersonline@gmail.com,raajbala1999@gmail.com
+          from: "Security Ops <${{ secrets.EMAIL_USER }}>"
+          html_body: |
+            <!DOCTYPE html>
+            <html>
+            <body style="font-family: 'Courier New', Courier, monospace; line-height: 1.6; color: #e1e4e8; background-color: #0d1117; padding: 20px;">
+              <div style="max-width: 650px; margin: 0 auto; background: #161b22; border: 1px solid #30363d; border-radius: 6px; overflow: hidden;">
+                
+                <!-- HEADER -->
+                <div style="background: #238636; padding: 20px; text-align: center; border-bottom: 1px solid #30363d;">
+                  <h2 style="color: #ffffff; margin: 0; font-size: 20px; letter-spacing: 1px;">✅ SYSTEM INTEGRITY VERIFIED</h2>
+                  <p style="color: #e3f2fd; margin: 5px 0 0 0; font-size: 12px;">AUTOMATED BACKUP PROTOCOL</p>
+                </div>
+
+                <!-- INFO TABLE -->
+                <div style="padding: 24px;">
+                  <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 14px;">
+                    <tr style="border-bottom: 1px solid #30363d;">
+                      <td style="padding: 12px 0; color: #8b949e;">📁 Target Repository</td>
+                      <td style="padding: 12px 0; text-align: right; color: #58a6ff; font-weight: bold;">${{ github.repository }}</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #30363d;">
+                      <td style="padding: 12px 0; color: #8b949e;">📦 Artifact Type</td>
+                      <td style="padding: 12px 0; text-align: right; color: #c9d1d9;">MySQL Dump (Uncompressed)</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #30363d;">
+                      <td style="padding: 12px 0; color: #8b949e;">📏 Payload Size</td>
+                      <td style="padding: 12px 0; text-align: right; color: #3fb950; font-weight: bold;">${{ env.BACKUP_SIZE }}</td>
+                    </tr>
+                    <tr>
+                      <td style="padding: 12px 0; color: #8b949e;">⏱ Timestamp</td>
+                      <td style="padding: 12px 0; text-align: right; color: #c9d1d9;">$(date +'%Y-%m-%d %H:%M:%S UTC')</td>
+                    </tr>
+                  </table>
+                  
+                  <!-- HISTORY SECTION -->
+                  <div style="background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 15px;">
+                    <h3 style="margin: 0 0 10px 0; color: #8b949e; font-size: 12px; text-transform: uppercase; border-bottom: 1px solid #30363d; padding-bottom: 5px;">📜 Recent Archive Manifest</h3>
+                    <ul style="margin: 0; padding-left: 20px; color: #c9d1d9; font-size: 13px;">
+                      ${{ env.HISTORICAL_HTML }}
+                    </ul>
+                  </div>
+
+                  <!-- FOOTER -->
+                  <div style="margin-top: 25px; text-align: center; font-size: 11px; color: #8b949e; border-top: 1px solid #30363d; padding-top: 15px;">
+                    <p style="margin: 0;">SECURE TRANSMISSION VIA GITHUB ACTIONS</p>
+                    <p style="margin: 5px 0 0 0;">
+                      <a href="https://github.com/${{ github.repository }}/actions" style="color: #58a6ff; text-decoration: none;">[VIEW SYSTEM LOGS]</a>
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </body>
+            </html>
+          attachments: temp_backups/*.sql
+
+      - name: 📱 Telegram Notification
+        if: always()
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BACKUP_SIZE: ${{ env.BACKUP_SIZE }}
+          REPO: ${{ github.repository }}
+          JOB_STATUS: ${{ job.status }}
+          # HISTORICAL_TEXT is expected to be set by process_backups.py in the previous step
+        run: |
+          echo "📡 Initiating Telegram Uplink..."
+          python3 "${{ github.workspace }}/.github/scripts/backup_notify.py"
