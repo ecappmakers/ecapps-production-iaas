@@ -46,7 +46,7 @@
       "name": "blogs.friendselectricals.store",
       "type": "static",
       "repo_url": "ecappmakers/friendselectricals_blogs",
-      "branch": "v3.1.1",
+      "branch": "master",
       "build_cmd": "",
       "output_dir": ".",
       "domain": "blogs.friendselectricals.store"
