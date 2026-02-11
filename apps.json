@@ -43,15 +43,6 @@
       "branch": "main"
     },
     {
-      "name": "aladeeswarankovil.ecapps.in",
-      "type": "static",
-      "repo_url": "ecappmakers/aladeeswarankovil_html",
-      "branch": "main",
-      "build_cmd": "",
-      "output_dir": ".",
-      "domain": "aladeeswarankovil.ecapps.in"
-    },
-    {
       "name": "blogs.friendselectricals.store",
       "type": "static",
       "repo_url": "danpros/htmly",
