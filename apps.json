@@ -50,6 +50,15 @@
       "build_cmd": "",
       "output_dir": ".",
       "domain": "aladeeswarankovil.ecapps.in"
+    },
+    {
+      "name": "blogs.friendselectricals.store",
+      "type": "static",
+      "repo_url": "danpros/htmly",
+      "branch": "v3.1.1",
+      "build_cmd": "",
+      "output_dir": ".",
+      "domain": "blogs.friendselectricals.store"
     }
   ]
 }
