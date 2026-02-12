@@ -13,9 +13,9 @@
       "name": "friendselectricals.store",
       "type": "static",
       "repo_url": "ecappmakers/friends-electricals-home",
-      "branch": "master",
+      "branch": "V3",
       "build_cmd": "npm install && npm run build",
-      "output_dir": "dist/friends-electricals-modern/browser",
+      "output_dir": "dist",
       "domain": "friendselectricals.store"
     },
     {
