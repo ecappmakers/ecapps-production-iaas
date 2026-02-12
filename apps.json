@@ -35,21 +35,6 @@
       "build_cmd": "npm install && npm run build",
       "output_dir": "dist",
       "domain": "madhumanish.studio"
-    },
-    {
-      "name": "aladeeswaran_schema",
-      "type": "database",
-      "repo_url": "ecappmakers/aladeeswaran_schema",
-      "branch": "main"
-    },
-    {
-      "name": "blogs.friendselectricals.store",
-      "type": "static",
-      "repo_url": "ecappmakers/friendselectricals_blogs",
-      "branch": "master",
-      "build_cmd": "",
-      "output_dir": ".",
-      "domain": "blogs.friendselectricals.store"
     }
   ]
 }
