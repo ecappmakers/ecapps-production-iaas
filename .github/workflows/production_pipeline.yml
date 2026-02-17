@@ -642,7 +642,8 @@ jobs:
             for row in $(jq -r '.apps[] | select(.type | ascii_downcase | test("spring")) | @base64' apps.json); do
               _jq() { echo "$row" | base64 --decode | jq -r "$1"; }
               NAME=$(_jq '.name')
-              echo "   ➕ Spring Container: $NAME"
+              DB_NAME=$(_jq '.db_name // .name')
+              echo "   ➕ Spring Container: $NAME (DB: $DB_NAME)"
               
               cat >> docker-compose.prod.yml <<EOF
               $NAME:
@@ -655,7 +656,7 @@ jobs:
                   - redis
                 environment:
                   - SPRING_DATA_REDIS_HOST=main_redis
-                  - SPRING_DATASOURCE_URL=jdbc:mariadb://main_db:3306/$NAME
+                  - SPRING_DATASOURCE_URL=jdbc:mariadb://main_db:3306/$DB_NAME
                   - SPRING_DATASOURCE_USERNAME=root
                   - SPRING_DATASOURCE_PASSWORD=$DB_PASS
             EOF

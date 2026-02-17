@@ -41,6 +41,7 @@
       "type": "spring",
       "repo_url": "ecappmakers/smart-campus-os",
       "branch": "main",
+      "db_name": "campusos",
       "frontend": {
         "repo": "ecappmakers/smart-campus-os-client",
         "branch": "main",
