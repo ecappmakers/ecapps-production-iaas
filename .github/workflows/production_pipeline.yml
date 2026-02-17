@@ -14,6 +14,10 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
 jobs:
 
   # ======================================================
@@ -27,11 +31,11 @@ jobs:
       has_containers: ${{ steps.set-matrix.outputs.has_containers }}
       matrix_statics: ${{ steps.set-matrix.outputs.statics }}
       has_statics: ${{ steps.set-matrix.outputs.has_statics }}
-      matrix_databases: ${{ steps.set-matrix.outputs.databases }}
-      has_databases: ${{ steps.set-matrix.outputs.has_databases }}
+      matrix_springs: ${{ steps.set-matrix.outputs.springs }}
+      has_spring: ${{ steps.set-matrix.outputs.has_spring }}
     steps:
       - name: 📥 Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: 🧮 Analyze apps.json
         id: set-matrix
@@ -44,26 +48,36 @@ jobs:
             exit 1
           fi
 
+          # Validate apps.json schema — every entry must have name, type, and repo/repo_url
+          echo "🔍 Validating apps.json schema..." | tee -a build.log
+          INVALID=$(jq -r '[.apps[] | select(.name == null or .name == "" or .type == null or .type == "" or ((.repo_url == null or .repo_url == "") and (.repo == null or .repo == "")))] | length' apps.json)
+          if [ "$INVALID" -gt 0 ]; then
+            echo "❌ CRITICAL: $INVALID app(s) missing required fields (name, type, repo_url/repo)" | tee -a build.log
+            jq '.apps[] | select(.name == null or .name == "" or .type == null or .type == "" or ((.repo_url == null or .repo_url == "") and (.repo == null or .repo == "")))' apps.json | tee -a build.log
+            exit 1
+          fi
+          echo "✅ All apps have required fields" | tee -a build.log
+
           # Logic: Maps 'repo' -> 'repo_url' and handles types case-insensitively
           CONTAINERS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("container|backend")) | . + {repo_url: (.repo_url // .repo)}]}' apps.json)
           STATICS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("static|node")) | . + {repo_url: (.repo_url // .repo)}]}' apps.json)
-          DATABASES=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("database")) | . + {repo_url: (.repo_url // .repo)}]}' apps.json)
+          SPRINGS=$(jq -c '{include: [.apps[] | select(.type | ascii_downcase | test("spring")) | . + {repo_url: (.repo_url // .repo)}]}' apps.json)
 
           COUNT_C=$(echo "$CONTAINERS" | jq '.include | length')
           COUNT_S=$(echo "$STATICS" | jq '.include | length')
-          COUNT_D=$(echo "$DATABASES" | jq '.include | length')
+          COUNT_SP=$(echo "$SPRINGS" | jq '.include | length')
 
           echo "📦 Containers found : $COUNT_C" | tee -a build.log
           echo "⚡ Static Apps found: $COUNT_S" | tee -a build.log
-          echo "🗄️ Database Apps found: $COUNT_D" | tee -a build.log
+          echo "🍃 Spring Apps found : $COUNT_SP" | tee -a build.log
 
           echo "containers=$CONTAINERS" >> "$GITHUB_OUTPUT"
           echo "statics=$STATICS" >> "$GITHUB_OUTPUT"
-          echo "databases=$DATABASES" >> "$GITHUB_OUTPUT"
+          echo "springs=$SPRINGS" >> "$GITHUB_OUTPUT"
 
           [ "$COUNT_C" -gt 0 ] && echo "has_containers=true" >> "$GITHUB_OUTPUT" || echo "has_containers=false" >> "$GITHUB_OUTPUT"
           [ "$COUNT_S" -gt 0 ] && echo "has_statics=true" >> "$GITHUB_OUTPUT" || echo "has_statics=false" >> "$GITHUB_OUTPUT"
-          [ "$COUNT_D" -gt 0 ] && echo "has_databases=true" >> "$GITHUB_OUTPUT" || echo "has_databases=false" >> "$GITHUB_OUTPUT"
+          [ "$COUNT_SP" -gt 0 ] && echo "has_spring=true" >> "$GITHUB_OUTPUT" || echo "has_spring=false" >> "$GITHUB_OUTPUT"
 
   # ======================================================
   # 2. BUILD CONTAINERS
@@ -78,7 +92,7 @@ jobs:
       matrix: ${{ fromJson(needs.plan.outputs.matrix_containers) }}
     steps:
       - name: 📥 Checkout Source
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo_url }}
           ref: ${{ matrix.branch }}
@@ -86,21 +100,27 @@ jobs:
 
       - name: 🔑 Prepare Registry
         id: meta
-        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: 🔒 Login to GHCR
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 🔨 Build & Push
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.name }}:latest
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.name }}:latest
+            ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.name }}:${{ steps.meta.outputs.sha_short }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: 📝 Log Result
         run: echo "🐳 ${{ matrix.name }} (Container)" | tee -a built_apps.txt
@@ -109,6 +129,7 @@ jobs:
         with:
           name: log-container-${{ matrix.name }}
           path: built_apps.txt
+          retention-days: 7
 
   # ======================================================
   # 3. BUILD STATIC SITES
@@ -123,7 +144,7 @@ jobs:
       matrix: ${{ fromJson(needs.plan.outputs.matrix_statics) }}
     steps:
       - name: 📥 Checkout Source
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo_url }}
           ref: ${{ matrix.branch }}
@@ -243,83 +264,247 @@ jobs:
           name: static-site-${{ matrix.name }}
           path: output
           include-hidden-files: true
+          retention-days: 7
 
       - uses: actions/upload-artifact@v4
         with:
           name: log-static-${{ matrix.name }}
           path: built_static.txt
+          retention-days: 7
 
   # ======================================================
-  # 3B. FETCH DATABASE SCHEMA
+  # 3D. BUILD SPRING BOOT (SPLIT FRONTEND)
   # ======================================================
-  build-database:
-    name: 🗄️ Fetch ${{ matrix.name }}
+  build-spring:
+    name: 🍃 Build ${{ matrix.name }}
     needs: plan
     runs-on: ubuntu-latest
-    if: ${{ needs.plan.outputs.has_databases == 'true' }}
+    if: ${{ needs.plan.outputs.has_spring == 'true' }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.plan.outputs.matrix_databases) }}
+      matrix: ${{ fromJson(needs.plan.outputs.matrix_springs) }}
     steps:
-      - name: 📥 Checkout Database Repo
-        uses: actions/checkout@v3
+      - name: 📥 Checkout Backend (Main Repo)
+        uses: actions/checkout@v4
         with:
           repository: ${{ matrix.repo_url }}
           ref: ${{ matrix.branch }}
           token: ${{ secrets.GH_PAT }}
-          path: db_source
+          path: backend
 
-      - name: 📋 Extract Schema & Config
+      - name: 📥 Checkout Frontend Repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.frontend.repo }}
+          ref: ${{ matrix.frontend.branch || 'main' }}
+          token: ${{ secrets.GH_PAT }}
+          path: frontend
+
+      - name: 🔧 Setup Node.js for Frontend
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 🔨 Build Frontend
         run: |
           set -e
-          echo "==== 📋 PROCESSING: ${{ matrix.name }} ======"
-          
-          mkdir -p output
-          
-          # Check if db-config.json exists
-          if [ ! -f "db_source/db-config.json" ]; then
-            echo "❌ Error: db-config.json not found in repo!"
+          echo "==== 🎨 BUILDING FRONTEND for ${{ matrix.name }} ======"
+          cd frontend
+
+          # Use custom build command if provided, otherwise default
+          BUILD_CMD="${{ matrix.frontend.build_cmd }}"
+          if [ -z "$BUILD_CMD" ] || [ "$BUILD_CMD" == "null" ]; then
+            BUILD_CMD="npm install && npm run build"
+          fi
+
+          echo "▶️ Executing: $BUILD_CMD"
+          eval "$BUILD_CMD"
+
+          # Determine output directory
+          OUTPUT_DIR="${{ matrix.frontend.output_dir }}"
+          if [ -z "$OUTPUT_DIR" ] || [ "$OUTPUT_DIR" == "null" ]; then
+            OUTPUT_DIR="dist"
+          fi
+
+          if [ ! -d "$OUTPUT_DIR" ]; then
+            echo "❌ Error: Frontend output directory '$OUTPUT_DIR' not found!"
+            ls -la
             exit 1
           fi
-          
-          # Check if schema directory exists
-          if [ ! -d "db_source/schema" ]; then
-            echo "❌ Error: schema/ directory not found in repo!"
+
+          echo "✅ Frontend build complete. Output in: $OUTPUT_DIR"
+
+      - name: 📦 Merge Frontend Assets into Backend
+        run: |
+          set -e
+          echo "==== 📦 MERGING FRONTEND INTO BACKEND ======"
+
+          # Determine frontend output directory
+          OUTPUT_DIR="${{ matrix.frontend.output_dir }}"
+          if [ -z "$OUTPUT_DIR" ] || [ "$OUTPUT_DIR" == "null" ]; then
+            OUTPUT_DIR="dist"
+          fi
+
+          STATIC_DIR="backend/src/main/resources/static"
+          mkdir -p "$STATIC_DIR"
+
+          echo "▶️ Copying frontend/$OUTPUT_DIR/* → $STATIC_DIR/"
+          cp -r "frontend/$OUTPUT_DIR"/. "$STATIC_DIR/"
+
+          echo "✅ Merged $(find "$STATIC_DIR" -type f | wc -l) files into static resources"
+          ls -lah "$STATIC_DIR" | head -20
+
+      - name: ☕ Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: 'maven'
+
+      - name: 🧪 Run JUnit Tests
+        run: |
+          set -e
+          echo "==== 🧪 RUNNING TESTS: ${{ matrix.name }} ======"
+          cd backend
+
+          if [ -f "./mvnw" ]; then
+            chmod +x ./mvnw
+            echo "▶️ Running Maven tests..."
+            ./mvnw test
+          elif [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            echo "▶️ Running Gradle tests..."
+            ./gradlew test
+          else
+            echo "❌ Error: No mvnw or gradlew found!"
             exit 1
           fi
-          
-          # Copy config
-          cp "db_source/db-config.json" "output/"
-          echo "✅ Config copied: db-config.json"
-          
-          # Copy all JSON schema files
-          cp -r "db_source/schema" "output/"
-          SCHEMA_COUNT=$(find "output/schema" -name "*.json" | wc -l)
-          echo "✅ Copied $SCHEMA_COUNT schema file(s)"
-          
-          echo "🗄️ ${{ matrix.name }} (Database)" >> output/status.txt
+
+          echo "✅ All tests passed"
+
+      - name: 📊 Upload Test Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-${{ matrix.name }}
+          path: |
+            backend/target/surefire-reports/
+            backend/build/reports/tests/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: 🔨 Build Spring Boot Backend
+        run: |
+          set -e
+          echo "==== ☕ BUILDING SPRING BOOT: ${{ matrix.name }} ======"
+          cd backend
+
+          # Tests already passed — build and package (skip re-running tests)
+          if [ -f "./mvnw" ]; then
+            chmod +x ./mvnw
+            echo "▶️ Packaging with Maven Wrapper..."
+            ./mvnw package -DskipTests
+          elif [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            echo "▶️ Packaging with Gradle Wrapper..."
+            ./gradlew build -x test
+          else
+            echo "❌ Error: No mvnw or gradlew found!"
+            exit 1
+          fi
+
+          echo "✅ Backend build complete"
+
+          # Find the output JAR
+          JAR_FILE=$(find target -name "*.jar" -not -name "*-sources.jar" -not -name "*-javadoc.jar" 2>/dev/null | head -1)
+          if [ -z "$JAR_FILE" ]; then
+            JAR_FILE=$(find build/libs -name "*.jar" -not -name "*-plain.jar" 2>/dev/null | head -1)
+          fi
+
+          if [ -z "$JAR_FILE" ]; then
+            echo "❌ Error: No JAR file found after build!"
+            exit 1
+          fi
+
+          echo "📦 JAR found: $JAR_FILE"
+          echo "JAR_FILE=$JAR_FILE" >> "$GITHUB_ENV"
+
+      - name: 🔑 Prepare Registry
+        id: meta
+        run: |
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: 🔒 Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🐳 Containerize Spring Boot App
+        run: |
+          set -e
+          echo "==== 🐳 CONTAINERIZING: ${{ matrix.name }} ======"
+          cd backend
+
+          # Check if a Dockerfile exists in the backend
+          if [ ! -f "Dockerfile" ]; then
+            echo "⚠️ No Dockerfile found. Generating temporary Dockerfile..."
+
+            # Find the JAR file relative to backend directory
+            JAR_FILE=$(find target -name "*.jar" -not -name "*-sources.jar" -not -name "*-javadoc.jar" 2>/dev/null | head -1)
+            if [ -z "$JAR_FILE" ]; then
+              JAR_FILE=$(find build/libs -name "*.jar" -not -name "*-plain.jar" 2>/dev/null | head -1)
+            fi
+
+            cat > Dockerfile <<DOCKERFILE
+          FROM eclipse-temurin:21-jre-alpine
+          WORKDIR /app
+          COPY ${JAR_FILE} app.jar
+          EXPOSE 8080
+          ENTRYPOINT ["java", "-jar", "app.jar"]
+          DOCKERFILE
+
+            echo "✅ Generated Dockerfile:"
+            cat Dockerfile
+          else
+            echo "✅ Using existing Dockerfile from repository"
+          fi
+
+      - name: 🔨 Build & Push Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.name }}:latest
+            ghcr.io/${{ steps.meta.outputs.owner }}/${{ matrix.name }}:${{ steps.meta.outputs.sha_short }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 📝 Log Result
+        run: echo "🍃 ${{ matrix.name }} (Spring)" | tee -a built_apps.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: db-schema-${{ matrix.name }}
-          path: output
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: log-database-${{ matrix.name }}
-          path: output/status.txt
+          name: log-spring-${{ matrix.name }}
+          path: built_apps.txt
+          retention-days: 7
 
   # ======================================================
-  # 3C. BUILD STATIC SITES (CONTINUED)
+  # 4. DEPLOY TO VPS
   # ======================================================
   deploy:
     name: 🚀 Deploy to VPS
-    needs: [plan, build-containers, build-static, build-database]
+    needs: [plan, build-containers, build-static, build-spring]
     runs-on: ubuntu-latest
-    if: ${{ always() && !contains(needs.build-containers.result, 'failure') && !contains(needs.build-static.result, 'failure') && !contains(needs.build-database.result, 'failure') }}
+    if: ${{ always() && !contains(needs.build-containers.result, 'failure') && !contains(needs.build-static.result, 'failure') && !contains(needs.build-spring.result, 'failure') }}
     steps:
       - name: 📥 Checkout Infra
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: 📤 Upload Files
         uses: appleboy/scp-action@master
@@ -336,6 +521,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 5m
           script: |
             echo "🐍 Installing Python and dependencies..."
             apt-get update -qq
@@ -354,19 +540,15 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: GH_USER,GH_TOKEN,DB_PASS
+          command_timeout: 10m
           script: |
             set -e
             echo "==== 🚀 VPS DEPLOYMENT START ====" | tee -a deployment.log
 
             # 1. Setup Environment
             BASE="/opt/ecapps-hosting"
-            mkdir -p "$BASE/data/sites" "$BASE/data/mysql" "$BASE/data/init_sql" "$BASE/data/apache"
+            mkdir -p "$BASE/data/sites" "$BASE/data/mysql" "$BASE/data/apache"
             cd "$BASE"
-
-            # 1B. Verify schema directory
-            echo "🗄️ Preparing database schema directory..." | tee -a deployment.log
-            rm -f "$BASE/data/init_sql"/*  # Clear old schemas
-            mkdir -p "$BASE/data/init_sql"
 
             # 2. Generate Apache VHosts (Using Safe Append Method)
             echo "🌐 Generating Dynamic VHosts..." | tee -a deployment.log
@@ -400,7 +582,6 @@ jobs:
             echo "$GH_TOKEN" | docker login ghcr.io -u "$LOWER_USER" --password-stdin
 
             cat > docker-compose.prod.yml <<EOF
-            version: "3.8"
             services:
               shared_web:
                 build:
@@ -425,7 +606,17 @@ jobs:
                   MYSQL_ROOT_PASSWORD: $DB_PASS
                 volumes:
                   - "./data/mysql:/var/lib/mysql"
-                  - "./data/init_sql:/docker-entrypoint-initdb.d"
+                networks: [hosting_net]
+
+              redis:
+                image: redis:7-alpine
+                container_name: main_redis
+                restart: always
+                healthcheck:
+                  test: ["CMD", "redis-cli", "ping"]
+                  interval: 5s
+                  timeout: 3s
+                  retries: 5
                 networks: [hosting_net]
             EOF
 
@@ -446,6 +637,40 @@ jobs:
               echo "$row" | base64 --decode | jq -r '.env | to_entries[] | "      - \(.key)=\(.value)"' \
                 | sed "s/DB_ROOT_PASSWORD/$DB_PASS/" >> docker-compose.prod.yml
             done
+
+            # Inject Spring Containers
+            for row in $(jq -r '.apps[] | select(.type | ascii_downcase | test("spring")) | @base64' apps.json); do
+              _jq() { echo "$row" | base64 --decode | jq -r "$1"; }
+              NAME=$(_jq '.name')
+              echo "   ➕ Spring Container: $NAME"
+              
+              cat >> docker-compose.prod.yml <<EOF
+              $NAME:
+                image: ghcr.io/$LOWER_USER/$NAME:latest
+                container_name: $NAME
+                restart: always
+                networks: [hosting_net]
+                depends_on:
+                  - db
+                  - redis
+                environment:
+                  - SPRING_DATA_REDIS_HOST=main_redis
+                  - SPRING_DATASOURCE_URL=jdbc:mariadb://main_db:3306/$NAME
+                  - SPRING_DATASOURCE_USERNAME=root
+                  - SPRING_DATASOURCE_PASSWORD=$DB_PASS
+            EOF
+              # Append any additional env vars from apps.json
+              echo "$row" | base64 --decode | jq -r 'if .env then .env | to_entries[] | "      - \(.key)=\(.value)" else empty end' \
+                | sed "s/DB_ROOT_PASSWORD/$DB_PASS/" >> docker-compose.prod.yml
+            done
+
+            # Append top-level networks definition
+            cat >> docker-compose.prod.yml <<EOF
+
+            networks:
+              hosting_net:
+                external: true
+            EOF
 
             # 4. Build local images and pull remote images
             echo "🔨 Building shared_web from Dockerfile..."
@@ -490,21 +715,29 @@ jobs:
                echo "❌ CRITICAL: nginx_proxy failed to start."
             fi
 
-      - uses: actions/download-artifact@v4
-        if: needs.plan.outputs.has_databases == 'true'
-        with:
-          pattern: db-schema-*
-          path: temp_database
-          merge-multiple: false
-
-      - uses: appleboy/scp-action@master
-        if: needs.plan.outputs.has_databases == 'true'
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          source: temp_database/*
-          target: /opt/ecapps-hosting/temp_schemas
+            # 6. Spring Boot Health Checks
+            for row in $(jq -r '.apps[] | select(.type | ascii_downcase | test("spring")) | @base64' apps.json); do
+              _jq() { echo "$row" | base64 --decode | jq -r "$1"; }
+              NAME=$(_jq '.name')
+              PORT=$(_jq '.port // 8080')
+              echo "🍃 Checking health of Spring app: $NAME"
+              HEALTH_TIMEOUT=60
+              while [ $HEALTH_TIMEOUT -gt 0 ]; do
+                HEALTH=$(docker exec "$NAME" wget -qO- "http://localhost:$PORT/actuator/health" 2>/dev/null || true)
+                if echo "$HEALTH" | grep -q '"UP"'; then
+                  echo "✅ $NAME is healthy!"
+                  break
+                fi
+                echo "⏳ Waiting for $NAME... ($HEALTH_TIMEOUT s left)"
+                sleep 2
+                HEALTH_TIMEOUT=$((HEALTH_TIMEOUT - 2))
+              done
+              if [ $HEALTH_TIMEOUT -le 0 ]; then
+                echo "⚠️ $NAME did not become healthy within timeout"
+                echo "   Last 20 log lines:"
+                docker logs --tail 20 "$NAME" 2>&1 | sed 's/^/   /'
+              fi
+            done
 
       - uses: actions/download-artifact@v4
         if: needs.plan.outputs.has_statics == 'true'
@@ -529,49 +762,12 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          command_timeout: 10m
           script: |
             BASE="/opt/ecapps-hosting"
             
             echo "==================== 📦 STARTING SYNC OPERATIONS ===================="
             echo ""
-            
-            # Sync Database Schemas
-            if [ -d "$BASE/temp_schemas/temp_database" ]; then
-                echo "🗄️ Syncing database schemas..."
-                for dir in $BASE/temp_schemas/temp_database/*/; do
-                   [ -d "$dir" ] || continue
-                   SCHEMA_NAME=$(basename "$dir" | sed 's/db-schema-//')
-                   CONFIG_FILE="$dir/db-config.json"
-                   
-                   if [ -f "$CONFIG_FILE" ]; then
-                      # Extract config
-                      DB_NAME=$(jq -r '.database_name' "$CONFIG_FILE")
-                      DB_USER=$(jq -r '.database_user' "$CONFIG_FILE")
-                      SECRET_NAME=$(jq -r '.secret_name' "$CONFIG_FILE")
-                      
-                      echo "   📋 Processing: $SCHEMA_NAME (DB: $DB_NAME)"
-                      
-                      # Create directory for schema files
-                      SCHEMA_DIR="$BASE/data/schemas/$DB_NAME"
-                      mkdir -p "$SCHEMA_DIR"
-                      
-                      # Copy db-config.json
-                      cp "$CONFIG_FILE" "$SCHEMA_DIR/" 2>/dev/null || true
-                      echo "✅ Config copied: $SCHEMA_DIR/db-config.json"
-                      
-                      # Copy schema files
-                      if [ -d "$dir/schema" ]; then
-                        cp -r "$dir/schema"/* "$SCHEMA_DIR/" 2>/dev/null || true
-                        echo "✅ Schema files copied to $SCHEMA_DIR"
-                      else
-                        echo "⚠️ No schema directory found in $SCHEMA_NAME"
-                      fi
-                   else
-                      echo "⚠️ No db-config.json found in: $SCHEMA_NAME"
-                   fi
-                done
-                rm -rf $BASE/temp_schemas
-            fi
             
             # Sync Static Sites
             if [ -d "$BASE/temp_uploads/temp_static" ]; then
@@ -723,175 +919,6 @@ jobs:
             echo ""
 
 
-      - name: 👤 Setup Database Users
-        uses: appleboy/ssh-action@master
-        env:
-          DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
-          ALADEESWARAN_DB_PASSWORD: ${{ secrets.ALADEESWARAN_DB_PASSWORD }}
-          DB_APP_PASSWORD: ${{ secrets.DB_APP_PASSWORD }}
-          DB_FRIENDSELECTRICALS_PASSWORD: ${{ secrets.DB_FRIENDSELECTRICALS_PASSWORD }}
-          DB_DEVSUITE_PASSWORD: ${{ secrets.DB_DEVSUITE_PASSWORD }}
-          DB_MADHUMANISH_PASSWORD: ${{ secrets.DB_MADHUMANISH_PASSWORD }}
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          envs: DB_ROOT_PASSWORD,ALADEESWARAN_DB_PASSWORD,DB_APP_PASSWORD,DB_FRIENDSELECTRICALS_PASSWORD,DB_DEVSUITE_PASSWORD,DB_MADHUMANISH_PASSWORD
-          script: |
-            set -e
-            BASE="/opt/ecapps-hosting"
-            DB_HOST="localhost"
-            DB_ROOT_USER="root"
-            DB_ROOT_PASS="$DB_ROOT_PASSWORD"
-            
-            echo "==================== 👤 DATABASE USER SETUP ===================="
-            echo ""
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting database user configuration..."
-            echo ""
-            
-            export BASE DB_HOST DB_ROOT_USER DB_ROOT_PASS
-            export $(env | grep '_PASSWORD=' | cut -d= -f1 | tr '\n' ' ')
-            
-            echo "[DEBUG] Environment Variables:"
-            echo "  - BASE: $BASE"
-            echo "  - DB_HOST: $DB_HOST"
-            echo "  - DB_ROOT_USER: $DB_ROOT_USER"
-            echo "  - DB_ROOT_PASS: ***"
-            echo ""
-            
-            # Extract all secret names from db-config.json files
-            echo "[STEP 1] Discovering secret names from db-config.json files..."
-            if [ -d "$BASE/data/schemas" ]; then
-              FOUND_CONFIGS=$(find "$BASE/data/schemas" -name "db-config.json" | wc -l)
-              echo "  Found $FOUND_CONFIGS db-config.json file(s)"
-            else
-              echo "  ⚠️ $BASE/data/schemas directory does not exist"
-            fi
-            
-            SECRETS_JSON=$(find "$BASE/data/schemas" -name "db-config.json" -exec jq -r '.secret_name' {} \; 2>/dev/null | jq -R . | jq -s . 2>/dev/null || echo '[]')
-            
-            echo "[DEBUG] Secrets array from configs: $SECRETS_JSON"
-            echo ""
-            
-            # Show which secrets are available in environment
-            echo "[STEP 2] Verifying secrets are available in environment..."
-            AVAILABLE_COUNT=$(env | grep '_PASSWORD=' | wc -l)
-            echo "  Looking for secrets with _PASSWORD suffix"
-            env | grep '_PASSWORD=' | cut -d= -f1 | sort | while read -r secret; do
-              echo "    ✓ Found: $secret"
-            done
-            echo "  Total available: $AVAILABLE_COUNT"
-            echo ""
-            
-            # Validate Python script exists
-            echo "[STEP 3] Validating Python script..."
-            if [ ! -f "$BASE/.github/scripts/setup_db_users.py" ]; then
-              echo "  ❌ ERROR: setup_db_users.py not found at $BASE/.github/scripts/setup_db_users.py"
-              exit 1
-            fi
-            echo "  ✓ Script found and readable"
-            echo ""
-            
-            # Pass secrets array as JSON argument to Python script
-            echo "[STEP 4] Executing setup_db_users.py..."
-            echo "  Command: python3 \"$BASE/.github/scripts/setup_db_users.py\" '$SECRETS_JSON'"
-            echo ""
-            python3 "$BASE/.github/scripts/setup_db_users.py" "$SECRETS_JSON"
-            PYTHON_EXIT=$?
-            
-            echo ""
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Python script exit code: $PYTHON_EXIT"
-            if [ $PYTHON_EXIT -eq 0 ]; then
-              echo "✅ Database user setup completed successfully"
-            else
-              echo "⚠️ Database user setup completed with warnings/errors"
-            fi
-            echo "=========================================================="
-            echo ""
-            
-            exit $PYTHON_EXIT
-      - name: 📊 Apply Schema Migrations
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script: |
-            set -e
-            BASE="/opt/ecapps-hosting"
-            DB_HOST="localhost"
-            DB_ROOT_USER="root"
-            DB_ROOT_PASS="${{ secrets.DB_ROOT_PASSWORD }}"
-            
-            echo "==================== 📊 SCHEMA MIGRATIONS ===================="
-            echo ""
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting schema migrations..."
-            echo ""
-            
-            # Validate script exists
-            if [ ! -f "$BASE/.github/scripts/run_migrations.py" ]; then
-              echo "❌ ERROR: run_migrations.py not found"
-              exit 1
-            fi
-            
-            echo "[DEBUG] Environment:"
-            echo "  - BASE: $BASE"
-            echo "  - DB_HOST: $DB_HOST"
-            echo "  - DB_ROOT_USER: $DB_ROOT_USER"
-            echo ""
-            
-            # Run migration script (Python already installed)
-            export BASE="$BASE"
-            export DB_HOST="$DB_HOST"
-            export DB_ROOT_USER="$DB_ROOT_USER"
-            export DB_ROOT_PASS="$DB_ROOT_PASS"
-            
-            echo "[STEP] Executing migration script..."
-            python3 "$BASE/.github/scripts/run_migrations.py"
-            MIGRATION_EXIT=$?
-            
-            echo ""
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Migration script exit code: $MIGRATION_EXIT"
-            echo "=========================================================="
-            echo ""
-            
-            exit $MIGRATION_EXIT
-
-      - name: 💪 Verify Database Schema
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          envs: DB_PASS
-          script: |
-            BASE="/opt/ecapps-hosting"
-            DB_PASS="${{ secrets.DB_ROOT_PASSWORD }}"
-            
-            echo "🗄️ Verifying database schema application..."
-            
-            # Check if schema files exist in init directory
-            SCHEMA_COUNT=$(find $BASE/data/init_sql -name "*.sql" 2>/dev/null | wc -l)
-            if [ "$SCHEMA_COUNT" -gt 0 ]; then
-              echo "✅ Found $SCHEMA_COUNT schema file(s) in initialization directory"
-              ls -lh $BASE/data/init_sql/*.sql
-            else
-              echo "⚠️ No schema files found (this is OK if database already initialized)"
-            fi
-            
-            # Query database to verify it's running and check tables
-            if docker ps | grep -q main_db; then
-              TABLES=$(docker exec main_db mysql -u root -p$DB_PASS -e "SHOW TABLES FROM information_schema LIMIT 1" 2>/dev/null | wc -l)
-              if [ "$TABLES" -gt 0 ]; then
-                echo "✅ Database is operational"
-                docker exec main_db mysql -u root -p$DB_PASS -e "SHOW DATABASES;" | head -10
-              else
-                echo "⚠️ Database query returned no results"
-              fi
-            else
-              echo "⚠️ main_db container is not running"
-            fi
-
   # ======================================================
   # 5. CONFIGURE PROXY
   # ======================================================
@@ -901,8 +928,8 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ always() && !contains(needs.deploy.result, 'failure') }}
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
       - run: |
@@ -939,6 +966,7 @@ jobs:
         with:
           name: log-npm
           path: npm_config.log
+          retention-days: 7
 
 # ======================================================
   # 6. NOTIFICATIONS
@@ -953,7 +981,7 @@ jobs:
       EMAIL_USER: ${{ secrets.EMAIL_USER }}
     steps:
       - name: 📥 Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: 📥 Download Logs
         uses: actions/download-artifact@v4
@@ -964,7 +992,7 @@ jobs:
           merge-multiple: true
 
       - name: 🐍 Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
