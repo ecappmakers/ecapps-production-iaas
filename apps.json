@@ -35,6 +35,18 @@
       "build_cmd": "npm install && npm run build",
       "output_dir": "dist",
       "domain": "madhumanish.studio"
+    },
+    {
+      "name": "smart-campus-os",
+      "type": "spring",
+      "repo_url": "ecappmakers/smart-campus-os",
+      "branch": "main",
+      "frontend": {
+        "repo": "ecappmakers/smart-campus-os-client",
+        "branch": "main",
+        "build_cmd": "npm install && npm run build",
+        "output_dir": "dist"
+      }
     }
   ]
 }

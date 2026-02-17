@@ -919,61 +919,12 @@ jobs:
             echo ""
 
 
-  # ======================================================
-  # 5. CONFIGURE PROXY
-  # ======================================================
-  configure-proxy:
-    name: 🌐 Configure Nginx Proxy Manager
-    needs: deploy
-    runs-on: ubuntu-latest
-    if: ${{ always() && !contains(needs.deploy.result, 'failure') }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-      - run: |
-          pip install requests urllib3
-
-      - name: Normalize Apps JSON
-        run: |
-          jq '.apps |= map(if .type == "node" then .type = "static" else . end)' apps.json > apps_fixed.json && mv apps_fixed.json apps.json
-
-      - name: 🌐 Configure NPM
-        env:
-          NPM_USER: ${{ secrets.NPM_USER }}
-          NPM_PASS: ${{ secrets.NPM_PASS }}
-          NPM_BASE_URL: "https://pm.ecapps.in"
-          NPM_TIMEOUT: "120"
-          APPS_FILE: "apps.json"
-        run: |
-          echo "🌐 Validating NPM credentials..."
-          if [ -z "$NPM_USER" ]; then
-            echo "❌ Error: NPM_USER secret is not set"
-            exit 1
-          fi
-          if [ -z "$NPM_PASS" ]; then
-            echo "❌ Error: NPM_PASS secret is not set"
-            exit 1
-          fi
-          echo "✅ NPM credentials are set"
-          echo "🌐 NPM URL: $NPM_BASE_URL"
-          echo "🌐 Running configuration..."
-          python .github/scripts/configure_npm.py 2>&1 | tee npm_config.log
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: log-npm
-          path: npm_config.log
-          retention-days: 7
-
 # ======================================================
   # 6. NOTIFICATIONS
   # ======================================================
   notify:
     name: 🔔 Notify Summary
-    needs: [deploy, configure-proxy]
+    needs: [deploy]
     if: always()
     runs-on: ubuntu-latest
     env:
@@ -1000,7 +951,6 @@ jobs:
         id: builder
         env:
           DEPLOY_RESULT: ${{ needs.deploy.result }}
-          PROXY_RESULT: ${{ needs.configure-proxy.result }}
         run: |
           chmod +x .github/scripts/notification_builder.py
           python .github/scripts/notification_builder.py

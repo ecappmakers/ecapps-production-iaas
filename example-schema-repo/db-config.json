@@ -1,6 +1,0 @@
-{
-  "database_name": "app_db",
-  "database_user": "app_user",
-  "secret_name": "DB_APP_PASSWORD",
-  "description": "Main application database"
-}
